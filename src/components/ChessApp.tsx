@@ -6,7 +6,7 @@ import { ReviewSummary } from "@/components/chess/ReviewSummary";
 import { StockfishEngine, thinkBudget, type EngineLine } from "@/lib/engine";
 import {
   JUDGMENT_META,
-  average,
+  gameAccuracy,
   emptyCounts,
   formatEval,
   formatPercent,
@@ -48,8 +48,13 @@ import { byteQuip } from "@/lib/byte-voice";
 
 const STORAGE_KEY = "byte-chess-review-v1";
 const LEGACY_STORAGE_KEY = "grok-chess-review-v1";
-const REVIEW_DEPTH = 12;
-const VERIFY_DEPTH = 16;
+/** Força da revisão: profundidade e tempo máximo por posição (o que vier primeiro para a busca). */
+type Strength = "fast" | "standard" | "deep";
+const STRENGTHS: Record<Strength, { label: string; depth: number; movetime: number }> = {
+  fast: { label: "Rápida", depth: 12, movetime: 1800 },
+  standard: { label: "Padrão", depth: 16, movetime: 4000 },
+  deep: { label: "Profunda", depth: 20, movetime: 9000 },
+};
 const ZERO: WhiteEval = { cp: 0, mate: null };
 
 type Mode = "play" | "analyze";
@@ -107,6 +112,7 @@ export function ChessApp() {
   const [premoves, setPremoves] = useState<Premove[]>([]);
   const [visited, setVisited] = useState({ puzzle: false, repo: false });
   const [premoveOn, setPremoveOn] = useState(true);
+  const [strength, setStrength] = useState<Strength>("standard");
   const [searchGen, setSearchGen] = useState(0);
   const [openings, setOpenings] = useState<OpeningsIndex | null>(null);
   const [quip, setQuip] = useState(() => byteQuip(0));
@@ -179,14 +185,18 @@ export function ChessApp() {
   const summary = useMemo(() => {
     if (!activeReview) return null;
     const bag: Record<"w" | "b", number[]> = { w: [], b: [] };
+    const all: Record<"w" | "b", number[]> = { w: [], b: [] };
     const counts: Record<"w" | "b", JudgmentCounts> = { w: emptyCounts(), b: emptyCounts() };
     for (const [index, item] of Object.entries(activeReview.moves)) {
       const ply = plies[Number(index)];
       if (!ply?.color) continue;
-      bag[ply.color].push(item.accuracy);
+      all[ply.color].push(item.accuracy);
+      // Lances de livro e lances forçados não dizem nada sobre o jogador: ficam fora da média.
+      if (item.judgment !== "book" && !item.forced) bag[ply.color].push(item.accuracy);
       counts[ply.color][item.judgment] += 1;
     }
-    return { white: average(bag.w), black: average(bag.b), counts };
+    const pick = (color: "w" | "b") => gameAccuracy(bag[color].length > 0 ? bag[color] : all[color]);
+    return { white: pick("w"), black: pick("b"), counts };
   }, [activeReview, plies]);
 
   useEffect(() => {
@@ -216,8 +226,9 @@ export function ChessApp() {
     try {
       const raw = localStorage.getItem(PREFS_KEY);
       if (!raw) return;
-      const saved = JSON.parse(raw) as { premove?: boolean; drawColor?: string };
+      const saved = JSON.parse(raw) as { premove?: boolean; drawColor?: string; strength?: string };
       if (typeof saved.premove === "boolean") setPremoveOn(saved.premove);
+      if (saved.strength && saved.strength in STRENGTHS) setStrength(saved.strength as Strength);
       if (saved.drawColor && saved.drawColor in SHAPE_COLORS) setDrawColor(saved.drawColor as ShapeColor);
     } catch {
       /* ignore */
@@ -226,11 +237,11 @@ export function ChessApp() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify({ premove: premoveOn, drawColor }));
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ premove: premoveOn, drawColor, strength }));
     } catch {
       /* ignore quota */
     }
-  }, [drawColor, premoveOn]);
+  }, [drawColor, premoveOn, strength]);
 
   // A análise fica guardada até o PGN ou o FEN mudarem: ao voltar para a mesma partida, ela reaparece.
   useEffect(() => {
@@ -884,92 +895,98 @@ export function ChessApp() {
     const moves: Record<number, MoveReview> = previous ? { ...previous.moves } : {};
     const startAt = previous ? Math.min(total, previous.progress) + 1 : 1;
     const bookMatch = openings && isStandardStart(snapshot) ? matchOpening(openings, snapshot.map((item) => item.fen)) : null;
+    const power = STRENGTHS[strength];
     setTab("review");
     setAltFor(null);
     putReview({ key: gameKey, status: "running", progress: startAt - 1, total, partial: false, moves: { ...moves } });
     try {
       await engine.cancel();
       let prevLoss = moves[startAt - 1]?.winLoss ?? 0;
-      for (let index = startAt; index <= total; index += 1) {
+      // Cada posição é buscada UMA vez. A busca da posição k serve de "depois" do lance k e de "antes" do lance k+1,
+      // como na Lichess: o lance é medido pela avaliação independente da posição que ele criou.
+      let before: { fen: string; lines: EngineLine[]; bestmove: string } | null = null;
+      for (let k = startAt - 1; k <= total; k += 1) {
         if (jobRef.current !== job) return;
-        const beforeFen = snapshot[index - 1]?.fen;
+        const fen = snapshot[k].fen;
+        const terminal = terminalEval(fen);
+        const bookHere = (bookMatch?.inBook[k] ?? false) && (k + 1 > total || (bookMatch?.inBook[k + 1] ?? false));
+        let here: { fen: string; lines: EngineLine[]; bestmove: string } | null = null;
+        let hereEval: WhiteEval;
+        if (terminal) {
+          hereEval = terminal;
+        } else {
+          const budget = bookHere ? { depth: 10, movetime: 500, multipv: 1 } : { depth: power.depth, movetime: power.movetime, multipv: 3 };
+          const searched = await engine.search({ fen, ...budget });
+          if (jobRef.current !== job || searched.cancelled) return;
+          here = { fen, lines: searched.lines, bestmove: searched.bestmove };
+          const top = searched.lines.find((line) => line.multipv === 1) ?? searched.lines[0];
+          hereEval = top ? toWhiteEval(top.scoreCp, top.mate, new Chess(fen).turn()) : ZERO;
+        }
+
+        const index = k;
         const ply = snapshot[index];
-        if (!beforeFen || !ply?.uci || !ply.color || !ply.from || !ply.to) continue;
-        const uci = ply.uci;
-        const color = ply.color;
-        const before = new Chess(beforeFen);
-        if (before.isGameOver()) break;
-        const inBook = bookMatch?.inBook[index] ?? false;
-        const forced = before.moves().length === 1;
-        const budget = inBook ? { depth: 10, movetime: 500, multipv: 1 } : { depth: REVIEW_DEPTH, movetime: 1800, multipv: 3 };
-        const searched = await engine.search({ fen: beforeFen, ...budget });
-        if (jobRef.current !== job || searched.cancelled) return;
-        const recapture = index >= 2 ? isRecapture(snapshot[index - 2].fen, snapshot[index - 1]?.uci, uci) : false;
+        if (index >= startAt && before && ply?.uci && ply.color && ply.from && ply.to) {
+          const uci = ply.uci;
+          const color = ply.color;
+          const beforeFen = before.fen;
+          const inBook = bookMatch?.inBook[index] ?? false;
+          const recapture = index >= 2 ? isRecapture(snapshot[index - 2].fen, snapshot[index - 1]?.uci, uci) : false;
+          let lines = before.lines;
+          let bestUci = before.bestmove;
+          let afterEval: WhiteEval = hereEval;
+          let shallowBest: string | undefined;
+          const judge = () =>
+            judgePly({
+              beforeFen,
+              uci,
+              color,
+              lines,
+              bestUci,
+              bestSan: sanOfUci(beforeFen, bestUci),
+              afterEval,
+              inBook,
+              recapture,
+              prevOpponentLoss: prevLoss,
+              seed: index,
+              shallowBest,
+            });
+          let result = judge();
 
-        // Avaliação depois do lance só é buscada quando ele não aparece entre as linhas do motor.
-        let afterEval: WhiteEval | undefined;
-        let afterLoaded = false;
-        const loadAfter = async () => {
-          if (afterLoaded) return true;
-          const terminal = terminalEval(ply.fen);
-          if (terminal) {
-            afterEval = terminal;
-          } else {
-            const after = new Chess(ply.fen);
-            const result = await engine.search({ fen: ply.fen, depth: REVIEW_DEPTH, movetime: 1800, multipv: 1 });
-            if (jobRef.current !== job || result.cancelled) return false;
-            const top = result.lines.find((line) => line.multipv === 1) ?? result.lines[0];
-            afterEval = top ? toWhiteEval(top.scoreCp, top.mate, after.turn()) : ZERO;
-          }
-          afterLoaded = true;
-          return true;
-        };
-
-        let lines = searched.lines;
-        let bestUci = searched.bestmove;
-        let shallowBest: string | undefined;
-        if (!forced && needsAfterSearch(lines, uci, bestUci) && !(await loadAfter())) return;
-        const judge = () =>
-          judgePly({
-            beforeFen,
-            uci,
-            color,
-            lines,
-            bestUci,
-            bestSan: sanOfUci(beforeFen, bestUci),
-            afterEval,
-            inBook,
-            recapture,
-            prevOpponentLoss: prevLoss,
-            seed: index,
-            shallowBest,
-          });
-        let result = judge();
-
-        // "Ótimo" e "Brilhante" são raros: confirma com uma busca mais funda antes de conceder.
-        if (result.judgment === "great" || result.judgment === "brilliant") {
-          const deep = await engine.search({ fen: beforeFen, depth: VERIFY_DEPTH, movetime: 3500, multipv: 3 });
-          if (jobRef.current !== job || deep.cancelled) return;
-          lines = deep.lines;
-          bestUci = deep.bestmove;
-          if (needsAfterSearch(lines, uci, bestUci) && !(await loadAfter())) return;
-          result = judge();
-          // Brilhante tem que ser difícil de achar: se um motor raso já escolhe esse lance, é óbvio.
-          if (result.judgment === "brilliant") {
-            const shallow = await engine.search({ fen: beforeFen, depth: 4, movetime: 400, multipv: 1 });
-            if (jobRef.current !== job || shallow.cancelled) return;
-            shallowBest = shallow.bestmove;
+          // "Ótimo" e "Brilhante" são raros: confirma com uma busca bem mais funda, antes e depois do lance.
+          if (result.judgment === "great" || result.judgment === "brilliant") {
+            const deepBudget = { depth: power.depth + 4, movetime: Math.round(power.movetime * 1.6) };
+            const deep = await engine.search({ fen: beforeFen, ...deepBudget, multipv: 3 });
+            if (jobRef.current !== job || deep.cancelled) return;
+            lines = deep.lines;
+            bestUci = deep.bestmove;
+            const terminalAfter = terminalEval(ply.fen);
+            if (terminalAfter) {
+              afterEval = terminalAfter;
+            } else {
+              const deepAfter = await engine.search({ fen: ply.fen, ...deepBudget, multipv: 1 });
+              if (jobRef.current !== job || deepAfter.cancelled) return;
+              const top = deepAfter.lines.find((line) => line.multipv === 1) ?? deepAfter.lines[0];
+              if (top) afterEval = toWhiteEval(top.scoreCp, top.mate, new Chess(ply.fen).turn());
+            }
             result = judge();
+            // Brilhante tem que ser difícil de achar: se um motor raso já escolhe esse lance, é óbvio.
+            if (result.judgment === "brilliant") {
+              const shallow = await engine.search({ fen: beforeFen, depth: 4, movetime: 400, multipv: 1 });
+              if (jobRef.current !== job || shallow.cancelled) return;
+              shallowBest = shallow.bestmove;
+              result = judge();
+            }
+          }
+
+          moves[index] = result;
+          prevLoss = result.winLoss;
+          putReview({ key: gameKey, status: "running", progress: index, total, partial: false, moves: { ...moves } });
+          // Ponto de retorno: se a aba fechar no meio, o que já foi avaliado fica guardado.
+          if (index % 10 === 0 && index < total) {
+            void saveAnalysis(analysisRecord(snapshot, { key: gameKey, status: "done", progress: index, total, partial: true, moves: { ...moves } }, shapesRef.current)).catch(() => undefined);
           }
         }
-
-        moves[index] = result;
-        prevLoss = result.winLoss;
-        putReview({ key: gameKey, status: "running", progress: index, total, partial: false, moves: { ...moves } });
-        // Ponto de retorno: se a aba fechar no meio, o que já foi avaliado fica guardado.
-        if (index % 10 === 0 && index < total) {
-          void saveAnalysis(analysisRecord(snapshot, { key: gameKey, status: "done", progress: index, total, partial: true, moves: { ...moves } }, shapesRef.current)).catch(() => undefined);
-        }
+        before = here;
       }
       if (jobRef.current !== job) return;
       putReview({ key: gameKey, status: "done", progress: total, total, partial: false, moves: { ...moves } });
@@ -1416,6 +1433,30 @@ export function ChessApp() {
 
           {tab === "review" ? (
             <Panel title="Revisão">
+              {!reviewRunning ? (
+                <div className="mb-3">
+                  <label className="mb-1 block text-sm text-muted" htmlFor="review-strength">
+                    Força da análise
+                  </label>
+                  <select
+                    id="review-strength"
+                    value={strength}
+                    onChange={(event) => setStrength(event.target.value as Strength)}
+                    className="min-h-11 w-full rounded-lg border border-line bg-cream px-2 text-sm"
+                  >
+                    {(Object.keys(STRENGTHS) as Strength[]).map((id) => (
+                      <option key={id} value={id}>
+                        {STRENGTHS[id].label} · profundidade {STRENGTHS[id].depth}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-muted">
+                    {plies.length > 1
+                      ? `Até ~${Math.max(1, Math.round((plies.length * STRENGTHS[strength].movetime * 0.6) / 60000))} min para esta partida. Mais fundo mostra erros que a análise rápida deixa passar.`
+                      : "Mais fundo mostra erros que a análise rápida deixa passar."}
+                  </p>
+                </div>
+              ) : null}
               {reviewRunning ? (
                 <div className="mb-3">
                   <p className="mb-2 text-sm text-ink">

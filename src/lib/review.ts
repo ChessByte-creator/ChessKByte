@@ -151,18 +151,20 @@ export function judgePly(input: JudgeInput): MoveReview {
   const playedBest = forced || uci === bestUci;
   const playedLine = lines.find((line) => firstMove(line.pv) === uci);
 
+  // A avaliação depois do lance vem, sempre que possível, de uma busca independente da posição seguinte
+  // (como na Lichess). Assim um lance que o motor "escolheu" mas que a busca seguinte desmente perde pontos.
   let evalAfter = evalBefore;
-  if (!playedBest) {
+  if (afterEval) evalAfter = afterEval;
+  else if (!playedBest) {
     if (playedLine) evalAfter = toWhiteEval(playedLine.scoreCp, playedLine.mate, turn);
-    else if (afterEval) evalAfter = afterEval;
   }
 
   const beforeMover = moverCp(evalBefore, color);
   const afterMover = moverCp(evalAfter, color);
   const winBefore = cpToWinPercent(beforeMover);
   const winAfter = cpToWinPercent(afterMover);
-  const winLoss = playedBest ? 0 : Math.max(0, winBefore - winAfter);
-  const lossCp = playedBest ? 0 : Math.max(0, beforeMover - afterMover);
+  const winLoss = forced ? 0 : Math.max(0, winBefore - winAfter);
+  const lossCp = forced ? 0 : Math.max(0, beforeMover - afterMover);
 
   // Melhor alternativa ao lance jogado.
   const alt = lines.find((line) => firstMove(line.pv) !== uci);
@@ -202,7 +204,7 @@ export function judgePly(input: JudgeInput): MoveReview {
     bestIsMate,
   });
 
-  const accuracy = playedBest || inBook ? 100 : moveAccuracy(winBefore, winAfter);
+  const accuracy = forced || inBook ? 100 : moveAccuracy(winBefore, winAfter);
   return {
     judgment,
     lossCp,
