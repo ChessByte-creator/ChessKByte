@@ -14,8 +14,18 @@ export function startPlies(): Ply[] {
   return [{ fen: new Chess().fen() }];
 }
 
+/** Identifica a partida: posição inicial + lances. Mudou o FEN ou o PGN, mudou a chave. */
 export function pliesKey(plies: Ply[]) {
-  return plies.map((ply) => ply.uci ?? "start").join(" ");
+  return `${plies[0]?.fen ?? ""}|${plies
+    .slice(1)
+    .map((ply) => ply.uci ?? "")
+    .join(" ")}`;
+}
+
+export const START_FEN = new Chess().fen();
+
+export function isStandardStart(plies: Ply[]) {
+  return plies[0]?.fen === START_FEN;
 }
 
 export function playUci(fen: string, uci: string): Move | null {
@@ -108,7 +118,7 @@ export function resultText(fen: string): string | null {
 }
 
 export function pgnOf(plies: Ply[]) {
-  const chess = new Chess();
+  const chess = new Chess(plies[0]?.fen ?? START_FEN);
   for (const ply of plies.slice(1)) {
     if (!ply.from || !ply.to) break;
     try {
@@ -132,7 +142,7 @@ export function pliesFromText(text: string): Ply[] | null {
   if (!trimmed.includes("[") && trimmed.split(/\s+/).length >= 4) {
     try {
       asFen.load(trimmed);
-      return replay(asFen);
+      return [{ fen: asFen.fen() }];
     } catch {
       /* try pgn */
     }
@@ -140,15 +150,15 @@ export function pliesFromText(text: string): Ply[] | null {
   const asPgn = new Chess();
   try {
     asPgn.loadPgn(trimmed);
-    return replay(asPgn);
+    return replay(asPgn, asPgn.getHeaders().FEN);
   } catch {
     return null;
   }
 }
 
-function replay(finalGame: Chess): Ply[] {
+function replay(finalGame: Chess, startFen?: string): Ply[] {
   const verbose = finalGame.history({ verbose: true });
-  const chess = new Chess();
+  const chess = new Chess(startFen ?? START_FEN);
   const plies: Ply[] = [{ fen: chess.fen() }];
   for (const move of verbose) {
     chess.move({ from: move.from, to: move.to, promotion: move.promotion });

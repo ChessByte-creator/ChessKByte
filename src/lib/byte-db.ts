@@ -1,8 +1,9 @@
 /** Banco local do Byte Chess (IndexedDB): puzzles e repositório de partidas. */
 export const BYTE_DB = "byte-chess";
-export const BYTE_DB_VERSION = 1;
+export const BYTE_DB_VERSION = 2;
 export const PUZZLE_STORE = "puzzles";
 export const GAME_STORE = "games";
+export const ANALYSIS_STORE = "analyses";
 
 const LEGACY_DB = "grok-chess-puzzles";
 const MIGRATED_KEY = "byte-chess-legacy-migrated";
@@ -31,8 +32,13 @@ function rawOpen(): Promise<IDBDatabase> {
         store.createIndex("cat", "cat", { unique: false, multiEntry: true });
         store.createIndex("players", "players", { unique: false, multiEntry: true });
       }
+      if (!db.objectStoreNames.contains(ANALYSIS_STORE)) {
+        const store = db.createObjectStore(ANALYSIS_STORE, { keyPath: "key" });
+        store.createIndex("savedAt", "savedAt", { unique: false });
+      }
     };
     request.onsuccess = () => resolve(request.result);
+    request.onblocked = () => reject(new Error("Feche as outras abas do Byte Chess para atualizar a base local."));
     request.onerror = () => reject(request.error ?? new Error("Não foi possível abrir a base local."));
   });
 }

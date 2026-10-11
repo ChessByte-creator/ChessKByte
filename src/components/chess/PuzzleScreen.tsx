@@ -3,6 +3,7 @@ import { Chess, type Square } from "chess.js";
 import { Board, type BoardArrow } from "@/components/chess/Board";
 import { clearPuzzles, countPuzzles, randomNear } from "@/lib/puzzle-db";
 import { importPuzzleFile } from "@/lib/importers/puzzle-import";
+import { PuzzleStream, type PuzzleFilter } from "@/lib/importers/puzzle-stream";
 import { kingInCheck } from "@/lib/game";
 import {
   BUILTIN_PUZZLES,
@@ -25,6 +26,18 @@ type Phase = "loading" | "setup" | "user" | "reply" | "solved" | "failed" | "sho
 type Promo = "q" | "r" | "b" | "n";
 
 const PROMO_LABEL: Record<Promo, string> = { q: "Dama", r: "Torre", b: "Bispo", n: "Cavalo" };
+
+/** Puzzles prontos (o atual + a fila) quando se lê o arquivo sob demanda. */
+const LAZY_TARGET = 5;
+const LAZY_MARK = "byte-chess-lazy-v1";
+
+type LazyState = {
+  stream: PuzzleStream;
+  queue: Puzzle[];
+  filter: PuzzleFilter;
+  busy: Promise<void>;
+  abort: AbortController;
+};
 
 export function PuzzleScreen() {
   const [profile, setProfile] = useState<PuzzleProfile>(DEFAULT_PROFILE);
@@ -51,6 +64,16 @@ export function PuzzleScreen() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [ratingDraft, setRatingDraft] = useState("1000");
   const [autoNext, setAutoNext] = useState(true);
+  const [lazyName, setLazyName] = useState("");
+  const [lazyNote, setLazyNote] = useState("");
+  const [lazyQueue, setLazyQueue] = useState(0);
+  const [lazyLines, setLazyLines] = useState(0);
+  const [lazyPct, setLazyPct] = useState(0);
+  const [lazyMin, setLazyMin] = useState("800");
+  const [lazyMax, setLazyMax] = useState("1600");
+  const [lazyRestart, setLazyRestart] = useState(false);
+  const lazyRef = useRef<LazyState | null>(null);
+  const lazyFileRef = useRef<HTMLInputElement>(null);
 
   const profileRef = useRef(profile);
   const puzzleRef = useRef(puzzle);
@@ -108,7 +131,116 @@ export function PuzzleScreen() {
     return pickFromList(BUILTIN_PUZZLES, current.rating, avoid, filter);
   }
 
+  /** Lê do arquivo só o que falta para manter a fila (uma leitura por vez). */
+  function lazyTake(state: LazyState, wanted: number) {
+    state.busy = state.busy.then(async () => {
+      if (state.abort.signal.aborted || state.stream.done) return;
+      const exclude = new Set<string>([...profileRef.current.recent, ...state.queue.map((item) => item.id)]);
+      if (puzzleRef.current) exclude.add(puzzleRef.current.id);
+      const found = await state.stream.take(wanted, state.filter, exclude, state.abort.signal, (lines) => {
+        setLazyLines(lines);
+        setLazyPct(state.stream.percent);
+      });
+      state.queue.push(...found);
+      setLazyQueue(state.queue.length);
+      setLazyLines(state.stream.linesRead);
+      setLazyPct(state.stream.percent);
+      try {
+        localStorage.setItem(LAZY_MARK, JSON.stringify({ name: state.stream.file.name, size: state.stream.file.size, lines: state.stream.linesRead }));
+      } catch {
+        /* ignore quota */
+      }
+    });
+    return state.busy;
+  }
+
+  /** Repõe a fila: depois de resolver um puzzle, lê mais um para manter os 5 prontos. */
+  function lazyRefill(solved: boolean) {
+    const state = lazyRef.current;
+    if (!state) return;
+    const target = solved ? LAZY_TARGET : LAZY_TARGET - 1;
+    const missing = target - state.queue.length;
+    if (missing > 0) void lazyTake(state, missing).catch(() => setLazyNote("Não consegui ler mais puzzles do arquivo."));
+  }
+
+  function stopLazy(note = "") {
+    const state = lazyRef.current;
+    if (state) {
+      state.abort.abort();
+      state.stream.close();
+    }
+    lazyRef.current = null;
+    setLazyName("");
+    setLazyQueue(0);
+    setLazyNote(note);
+  }
+
+  async function startLazy(file: File) {
+    stopLazy();
+    setLazyNote("Abrindo o arquivo…");
+    try {
+      let resume = 0;
+      try {
+        const saved = JSON.parse(localStorage.getItem(LAZY_MARK) ?? "null") as { name?: string; size?: number; lines?: number } | null;
+        if (!lazyRestart && saved && saved.name === file.name && saved.size === file.size && typeof saved.lines === "number") resume = saved.lines;
+      } catch {
+        resume = 0;
+      }
+      const stream = await PuzzleStream.open(file, resume);
+      const min = Math.max(0, Number(lazyMin) || 0);
+      const max = Math.max(min, Number(lazyMax) || 4000);
+      const state: LazyState = { stream, queue: [], filter: { minRating: min, maxRating: max, theme: themeRef.current }, busy: Promise.resolve(), abort: new AbortController() };
+      lazyRef.current = state;
+      setLazyName(file.name);
+      setLazyNote(resume > 0 ? `Retomando da linha ${resume.toLocaleString("pt-BR")}…` : "Procurando puzzles nos filtros…");
+      await lazyTake(state, LAZY_TARGET);
+      const first = state.queue.shift();
+      setLazyQueue(state.queue.length);
+      if (!first) {
+        setLazyNote("Nenhum puzzle com esses filtros nesse arquivo.");
+        return;
+      }
+      setLazyNote(`${LAZY_TARGET} puzzles prontos. A cada puzzle resolvido, o app lê mais um.`);
+      begin(first);
+    } catch (error) {
+      lazyRef.current = null;
+      setLazyName("");
+      setLazyNote(error instanceof Error && error.message ? error.message : "Não consegui abrir esse arquivo.");
+    }
+  }
+
+  /** Aplica novos filtros: descarta a fila e lê de novo (o puzzle atual continua). */
+  function applyLazyFilters() {
+    const state = lazyRef.current;
+    if (!state) return;
+    const min = Math.max(0, Number(lazyMin) || 0);
+    const max = Math.max(min, Number(lazyMax) || 4000);
+    state.filter = { minRating: min, maxRating: max, theme: themeRef.current };
+    state.queue = [];
+    setLazyQueue(0);
+    setLazyNote("Filtros aplicados. Procurando…");
+    lazyRefill(false);
+  }
+
   async function goNext() {
+    const lazy = lazyRef.current;
+    if (lazy) {
+      if (lazy.queue.length === 0) {
+        setLine("Procurando o próximo puzzle no arquivo…");
+        await lazyTake(lazy, 1);
+      }
+      const next = lazy.queue.shift();
+      setLazyQueue(lazy.queue.length);
+      if (next) {
+        begin(next);
+        lazyRefill(false);
+        return;
+      }
+      setLine("Acabaram os puzzles desse arquivo com esse filtro.");
+      setDetail("Troque o filtro, recomece o arquivo ou volte à base local.");
+      setPhase("failed");
+      return;
+    }
     const count = dbCount;
     const next = await choose(profileRef.current, count, themeRef.current);
     if (!next) {
@@ -138,6 +270,17 @@ export function PuzzleScreen() {
     // Boot once. remember/choose/begin are stable enough for this mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(
+    () => () => {
+      const state = lazyRef.current;
+      if (state) {
+        state.abort.abort();
+        state.stream.close();
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (phase !== "setup" || !puzzle || puzzle.moves.length < 2) return;
@@ -223,6 +366,7 @@ export function PuzzleScreen() {
     const delta = next.rating - profileRef.current.rating;
     const signed = `${delta >= 0 ? "+" : "−"}${Math.abs(delta)}`;
     remember(next);
+    lazyRefill(true);
     const ratingBit = success
       ? hintedRef.current
         ? `${signed} de rating · a dica não aumenta a sequência`
@@ -534,6 +678,62 @@ export function PuzzleScreen() {
             Sem limite de tamanho. Aceita o CSV da Lichess em .csv, .csv.zst ou .csv.gz, JSON e bancos SQLite (.db) com colunas FEN e Moves. O primeiro lance é do adversário; você responde em seguida. Arquivos .db são lidos inteiros na memória (até 1,5 GB).
           </p>
           {importNote ? <p className="mt-2 text-sm text-ink">{importNote}</p> : null}
+        </section>
+
+        <section className="rounded-3xl border border-line bg-paper p-4">
+          <h2 className="mb-1 text-sm font-semibold text-ink">Ler sob demanda (arquivo grande)</h2>
+          <p className="text-sm text-muted">
+            Sem importar nada: o app lê o arquivo só até achar {LAZY_TARGET} puzzles dentro dos filtros e, a cada puzzle resolvido, lê mais um. Aceita .csv, .zst, .gz e .db.
+          </p>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <div>
+              <label className="mb-1 block text-sm text-muted" htmlFor="lazy-min">
+                Rating mínimo
+              </label>
+              <input id="lazy-min" inputMode="numeric" value={lazyMin} onChange={(event) => setLazyMin(event.target.value.replace(/\D/g, "").slice(0, 4))} className="min-h-11 w-full rounded-lg border border-line bg-cream px-2 text-sm" />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-muted" htmlFor="lazy-max">
+                Rating máximo
+              </label>
+              <input id="lazy-max" inputMode="numeric" value={lazyMax} onChange={(event) => setLazyMax(event.target.value.replace(/\D/g, "").slice(0, 4))} className="min-h-11 w-full rounded-lg border border-line bg-cream px-2 text-sm" />
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-muted">O tema é o escolhido acima em “Tema do próximo”.</p>
+          <label className="mt-2 flex min-h-11 items-center gap-2 text-sm text-ink">
+            <input type="checkbox" checked={lazyRestart} onChange={(event) => setLazyRestart(event.target.checked)} className="size-5 accent-walnut" />
+            Recomeçar do início (senão retoma de onde parou)
+          </label>
+          <input
+            ref={lazyFileRef}
+            type="file"
+            accept=".csv,.tsv,.json,.txt,.zst,.gz,.db,.sqlite,.sqlite3"
+            className="sr-only"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (file) void startLazy(file);
+            }}
+          />
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <button type="button" className={btn(true)} onClick={() => lazyFileRef.current?.click()} disabled={importing}>
+              {lazyName ? "Trocar arquivo" : "Escolher arquivo"}
+            </button>
+            <button type="button" className={btn()} onClick={applyLazyFilters} disabled={!lazyName}>
+              Aplicar filtros
+            </button>
+            {lazyName ? (
+              <button type="button" className={`${btn()} col-span-2`} onClick={() => stopLazy("Leitura sob demanda encerrada. Voltamos à base local.")}>
+                Parar e voltar à base local
+              </button>
+            ) : null}
+          </div>
+          {lazyName ? (
+            <p className="mt-3 text-sm text-ink">
+              {lazyName} · {lazyQueue} na fila · {lazyLines.toLocaleString("pt-BR")} linhas lidas ({Math.round(lazyPct)}% do arquivo)
+            </p>
+          ) : null}
+          {lazyNote ? <p className="mt-2 text-sm text-muted">{lazyNote}</p> : null}
         </section>
       </aside>
     </div>

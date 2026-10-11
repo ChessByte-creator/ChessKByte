@@ -25,6 +25,16 @@ export type MoveReview = {
   sacrifice: boolean;
 };
 
+/** Estado da revisão de uma partida (guardado por chave: posição inicial + lances). */
+export type ReviewState = {
+  key: string;
+  status: "running" | "done";
+  progress: number;
+  total: number;
+  partial: boolean;
+  moves: Record<number, MoveReview>;
+};
+
 const PIECE_VALUE: Record<string, number> = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
 
 function material(chess: Chess, color: "w" | "b") {

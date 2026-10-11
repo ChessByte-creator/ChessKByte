@@ -21,6 +21,7 @@ import {
 import {
   appendMove,
   formatPv,
+  isStandardStart,
   kingInCheck,
   pliesFromText,
   pliesKey,
@@ -33,7 +34,11 @@ import {
   type Ply,
 } from "@/lib/game";
 import { loadOpenings, matchOpening, KIND_LABEL, openingNamePt, type OpeningsIndex } from "@/lib/openings";
-import { isRecapture, judgePly, needsAfterSearch, type MoveReview } from "@/lib/review";
+import { isRecapture, judgePly, needsAfterSearch, type MoveReview, type ReviewState } from "@/lib/review";
+import { loadAnalysis, saveAnalysis, type AnalysisRecord } from "@/lib/analysis-store";
+import { buildAnalysisJson, buildAnnotatedPgn, downloadText, parseAnalysisFile } from "@/lib/analysis-file";
+import { premoveTargets, resolvePremove, type Premove } from "@/lib/premove";
+import { SHAPE_COLORS, toggleShape, type Shape, type ShapeColor } from "@/lib/shapes";
 import { PERSONALITIES, personalityById, pickStyledMove, type PersonalityId } from "@/lib/style";
 import { PuzzleScreen } from "@/components/chess/PuzzleScreen";
 import { OpeningsScreen } from "@/components/chess/OpeningsScreen";
@@ -55,21 +60,13 @@ type BotSeat = { styleId: PersonalityId; rating: number };
 type DuelScore = { w: number; d: number; b: number };
 
 const DUEL_KEY = "byte-chess-duel-v1";
+const PREFS_KEY = "byte-chess-prefs-v1";
 const LEGACY_DUEL_KEY = "grok-chess-duel-v1";
 const PACES = [
   { id: 400, label: "Rápido" },
   { id: 800, label: "Normal" },
   { id: 1500, label: "Lento" },
 ] as const;
-
-type ReviewState = {
-  key: string;
-  status: "running" | "done";
-  progress: number;
-  total: number;
-  partial: boolean;
-  moves: Record<number, MoveReview>;
-};
 
 const PROMO_LABEL: Record<Promo, string> = {
   q: "Dama",
@@ -103,7 +100,12 @@ export function ChessApp() {
   const [notice, setNotice] = useState("");
   const [importText, setImportText] = useState("");
   const [altFor, setAltFor] = useState<number | null>(null);
-  const [review, setReview] = useState<ReviewState | null>(null);
+  const [reviews, setReviews] = useState<Record<string, ReviewState>>({});
+  const [shapesByFen, setShapesByFen] = useState<Record<string, Shape[]>>({});
+  const [drawMode, setDrawMode] = useState(false);
+  const [drawColor, setDrawColor] = useState<ShapeColor>("green");
+  const [premove, setPremove] = useState<Premove | null>(null);
+  const [premoveOn, setPremoveOn] = useState(true);
   const [searchGen, setSearchGen] = useState(0);
   const [openings, setOpenings] = useState<OpeningsIndex | null>(null);
   const [quip, setQuip] = useState(() => byteQuip(0));
@@ -125,6 +127,9 @@ export function ChessApp() {
   const jobRef = useRef(0);
   const scoredRef = useRef("");
   const matchSnap = useRef<{ plies: Ply[]; cursor: number; mode: Mode; player: "w" | "b"; flipped: boolean; remark: string } | null>(null);
+  const reviewsRef = useRef(reviews);
+  const shapesRef = useRef<Record<string, Shape[]>>({});
+  const analysisFileRef = useRef<HTMLInputElement>(null);
   const duelSnap = useRef<{ plies: Ply[]; cursor: number; flipped: boolean; remark: string } | null>(null);
   pliesRef.current = plies;
   cursorRef.current = cursor;
@@ -134,7 +139,9 @@ export function ChessApp() {
   duelRunRef.current = duelRun;
 
   const key = pliesKey(plies);
-  const activeReview = review && review.key === key ? review : null;
+  reviewsRef.current = reviews;
+  shapesRef.current = shapesByFen;
+  const activeReview = reviews[key] ?? null;
   const reviewRunning = activeReview?.status === "running";
   const atTip = cursor === plies.length - 1 && altFor == null;
   const viewIndex = altFor != null ? altFor - 1 : cursor;
@@ -149,8 +156,10 @@ export function ChessApp() {
     (mode === "analyze" || new Chess(plies[cursor].fen).turn() === player);
 
   const sideView = view === "puzzle" || view === "library" || view === "repo";
+  const myTurn = new Chess(plies[cursor]?.fen ?? plies[0].fen).turn() === player;
+  const canPremove = premoveOn && view === "match" && mode === "play" && atTip && !outcome && !myTurn && !reviewRunning && enginePhase === "ready";
 
-  const book = useMemo(() => (openings ? matchOpening(openings, plies.map((ply) => ply.fen)) : null), [openings, plies]);
+  const book = useMemo(() => (openings && isStandardStart(plies) ? matchOpening(openings, plies.map((ply) => ply.fen)) : null), [openings, plies]);
   const openingNow = book ? book.names[Math.min(cursor, book.names.length - 1)] : null;
 
   const shownEval = useMemo(() => {
@@ -193,6 +202,61 @@ export function ChessApp() {
       engineRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PREFS_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { premove?: boolean; drawColor?: string };
+      if (typeof saved.premove === "boolean") setPremoveOn(saved.premove);
+      if (saved.drawColor && saved.drawColor in SHAPE_COLORS) setDrawColor(saved.drawColor as ShapeColor);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ premove: premoveOn, drawColor }));
+    } catch {
+      /* ignore quota */
+    }
+  }, [drawColor, premoveOn]);
+
+  // A análise fica guardada até o PGN ou o FEN mudarem: ao voltar para a mesma partida, ela reaparece.
+  useEffect(() => {
+    if (view !== "match") return;
+    let alive = true;
+    const handle = window.setTimeout(() => {
+      if (reviewsRef.current[key]) return;
+      loadAnalysis(key)
+        .then((record) => {
+          if (!alive || !record) return;
+          const saved = record.review;
+          if (saved && !reviewsRef.current[record.key]) {
+            setReviews((current) => (current[record.key] ? current : { ...current, [record.key]: { key: record.key, ...saved, status: "done" } }));
+          }
+          if (Object.keys(record.shapes).length > 0) setShapesByFen((current) => ({ ...record.shapes, ...current }));
+        })
+        .catch(() => undefined);
+    }, 250);
+    return () => {
+      alive = false;
+      window.clearTimeout(handle);
+    };
+  }, [key, view]);
+
+  useEffect(() => {
+    if (view !== "match" || plies.length < 2) return;
+    const finished = activeReview?.status === "done" ? activeReview : null;
+    const fens = new Set(plies.map((item) => item.fen));
+    const hasShapes = Object.entries(shapesByFen).some(([fen, list]) => fens.has(fen) && list.length > 0);
+    if (!finished && !hasShapes) return;
+    const handle = window.setTimeout(() => {
+      void saveAnalysis(analysisRecord(plies, finished, shapesByFen)).catch(() => undefined);
+    }, 700);
+    return () => window.clearTimeout(handle);
+  }, [activeReview, plies, shapesByFen, view]);
 
   useEffect(() => {
     let alive = true;
@@ -307,6 +371,9 @@ export function ChessApp() {
         setCursor((current) => Math.min(pliesRef.current.length - 1, current + 1));
       } else if (event.key === "f" || event.key === "F") {
         setFlipped((value) => !value);
+      } else if (event.key === "Escape") {
+        setPremove(null);
+        setSelected(null);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -388,7 +455,6 @@ export function ChessApp() {
         setSelected(null);
         setPromo(null);
         setAltFor(null);
-        setReview(null);
       })
       .catch(() => {
         if (!dead) setThinking(false);
@@ -428,11 +494,14 @@ export function ChessApp() {
     setSelected(null);
     setPromo(null);
     setAltFor(null);
-    setReview(null);
     setRemark("");
   }, []);
 
   function selectSquare(square: Square) {
+    if (canPremove) {
+      selectForPremove(square);
+      return;
+    }
     if (!canMove) return;
     const fen = plies[plies.length - 1]?.fen;
     if (!fen) return;
@@ -451,7 +520,55 @@ export function ChessApp() {
     setSelected(null);
   }
 
+  useEffect(() => {
+    if (!premove) return;
+    if (view !== "match" || mode !== "play" || !premoveOn) {
+      setPremove(null);
+      return;
+    }
+    if (altFor != null || cursor !== plies.length - 1) {
+      setPremove(null);
+      return;
+    }
+    const last = plies[plies.length - 1];
+    if (resultText(last.fen)) {
+      setPremove(null);
+      return;
+    }
+    if (new Chess(last.fen).turn() !== player) return;
+    const resolved = resolvePremove(last.fen, premove);
+    const handle = window.setTimeout(() => {
+      setPremove(null);
+      if (resolved) commit(resolved.from, resolved.to, resolved.promotion);
+      else setRemark("Premove cancelado: o lance deixou de ser legal.");
+    }, 140);
+    return () => window.clearTimeout(handle);
+  }, [altFor, commit, cursor, mode, plies, player, premove, premoveOn, view]);
+
+  /** Na vez do adversário: escolher uma peça sua e uma casa agenda o premove. */
+  function selectForPremove(square: Square) {
+    const fen = pliesRef.current[pliesRef.current.length - 1]?.fen;
+    if (!fen) return;
+    if (selected && premoveTargets(fen, selected).includes(square)) {
+      setPremove({ from: selected, to: square });
+      setSelected(null);
+      return;
+    }
+    if (new Chess(fen).get(square)?.color === player) {
+      setSelected(square);
+      return;
+    }
+    setSelected(null);
+    setPremove(null);
+  }
+
   function tryMove(from: Square, to: Square) {
+    if (canPremove) {
+      const fen = pliesRef.current[pliesRef.current.length - 1]?.fen;
+      if (fen && premoveTargets(fen, from).includes(to)) setPremove({ from, to });
+      setSelected(null);
+      return;
+    }
     if (!canMove) return;
     const fen = pliesRef.current[pliesRef.current.length - 1]?.fen;
     if (!fen) return;
@@ -469,18 +586,44 @@ export function ChessApp() {
     commit(from, to, asPromo(promotions[0]?.promotion));
   }
 
-  function stopReview() {
+  /** Interrompe a revisão em andamento e guarda o que já foi avaliado como parcial. */
+  function haltReview() {
     jobRef.current += 1;
     holdRef.current = false;
     void engineRef.current?.cancel();
-    setReview((current) => (current && current.key === pliesKey(pliesRef.current) ? { ...current, status: "done", partial: true } : current));
+    setReviews((current) => {
+      let changed = false;
+      const next: Record<string, ReviewState> = {};
+      for (const [id, item] of Object.entries(current)) {
+        if (item.status === "running") {
+          changed = true;
+          next[id] = { ...item, status: "done", partial: true };
+        } else next[id] = item;
+      }
+      return changed ? next : current;
+    });
+  }
+
+  function stopReview() {
+    haltReview();
     setSearchGen((value) => value + 1);
   }
 
+  const putReview = useCallback((state: ReviewState) => {
+    setReviews((current) => {
+      const next = { ...current, [state.key]: state };
+      const keys = Object.keys(next);
+      for (const id of keys.slice(0, Math.max(0, keys.length - 12))) {
+        if (id !== state.key && next[id].status !== "running") delete next[id];
+      }
+      return next;
+    });
+  }, []);
+
   function resetTo(next: Ply[], nextMode: Mode, color: "w" | "b") {
-    jobRef.current += 1;
-    holdRef.current = false;
-    void engineRef.current?.cancel();
+    haltReview();
+    setShapesByFen({});
+    setPremove(null);
     setPlies(next);
     setCursor(next.length - 1);
     setMode(nextMode);
@@ -488,7 +631,6 @@ export function ChessApp() {
     setSelected(null);
     setPromo(null);
     setAltFor(null);
-    setReview(null);
     setLines([]);
     setLive(ZERO);
     setRemark("");
@@ -497,6 +639,9 @@ export function ChessApp() {
 
   function openView(next: View) {
     if (next === viewRef.current) return;
+    setPremove(null);
+    // O duelo usa o motor; as outras abas deixam a revisão terminar em segundo plano.
+    if (next === "duel") haltReview();
     if (viewRef.current === "match") {
       matchSnap.current = {
         plies: pliesRef.current,
@@ -523,7 +668,6 @@ export function ChessApp() {
       setSelected(null);
       setPromo(null);
       setAltFor(null);
-      setReview(null);
       setSearchGen((value) => value + 1);
       return;
     }
@@ -540,7 +684,6 @@ export function ChessApp() {
         setSelected(null);
         setPromo(null);
         setAltFor(null);
-        setReview(null);
         setSearchGen((value) => value + 1);
       } else {
         resetTo(startPlies(), "play", "w");
@@ -549,7 +692,7 @@ export function ChessApp() {
     }
     setDuelRun(false);
     setView(next);
-    void engineRef.current?.cancel();
+    if (!holdRef.current) void engineRef.current?.cancel();
   }
 
   /** Abre uma linha de abertura ou uma partida do repositório no modo análise. */
@@ -604,7 +747,6 @@ export function ChessApp() {
     setSelected(null);
     setPromo(null);
     setAltFor(null);
-    setReview(null);
   }
 
   function loadPosition() {
@@ -618,6 +760,71 @@ export function ChessApp() {
     setTab("engine");
   }
 
+  const shapes = shapesByFen[boardFen] ?? [];
+
+  function handleShape(shape: Shape) {
+    setShapesByFen((current) => {
+      const list = toggleShape(current[boardFen] ?? [], shape);
+      const next = { ...current };
+      if (list.length > 0) next[boardFen] = list;
+      else delete next[boardFen];
+      return next;
+    });
+  }
+
+  function clearShapesHere() {
+    setShapesByFen((current) => {
+      if (!current[boardFen]?.length) return current;
+      const next = { ...current };
+      delete next[boardFen];
+      return next;
+    });
+  }
+
+  function exportPayload() {
+    const accuracy = summary && summary.white != null && summary.black != null ? { white: summary.white, black: summary.black } : null;
+    return {
+      plies,
+      review: activeReview,
+      shapes: shapesByFen,
+      opening: book?.opening ? { eco: book.opening.eco, name: book.opening.name } : null,
+      accuracy,
+    };
+  }
+
+  function fileStamp() {
+    const now = new Date();
+    const two = (value: number) => String(value).padStart(2, "0");
+    return `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}${two(now.getMinutes())}`;
+  }
+
+  function saveAnnotatedPgn() {
+    downloadText(`byte-chess-${fileStamp()}.pgn`, buildAnnotatedPgn(exportPayload()), "application/x-chess-pgn");
+    setNotice("PGN anotado salvo.");
+  }
+
+  function saveAnalysisFile() {
+    downloadText(`byte-chess-analise-${fileStamp()}.json`, buildAnalysisJson(exportPayload()), "application/json");
+    setNotice("Análise salva. Abra de novo com “Abrir arquivo”.");
+  }
+
+  async function openAnalysisFile(file: File) {
+    if (file.size > 20_000_000) {
+      setNotice("Arquivo grande demais para abrir aqui.");
+      return;
+    }
+    const loaded = parseAnalysisFile(await file.text());
+    if (!loaded) {
+      setNotice("Não reconheci esse arquivo. Use uma análise do Byte Chess (.json), um PGN ou um FEN.");
+      return;
+    }
+    resetTo(loaded.plies, "analyze", player);
+    setShapesByFen(loaded.shapes);
+    if (loaded.review) putReview(loaded.review);
+    setTab(loaded.review ? "review" : "engine");
+    setNotice(loaded.kind === "analysis" ? "Análise carregada." : "PGN carregado no modo análise.");
+  }
+
   async function copyText(text: string, label: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -627,7 +834,22 @@ export function ChessApp() {
     }
   }
 
-  async function runReview() {
+  function analysisRecord(game: Ply[], state: ReviewState | null, drawings: Record<string, Shape[]>): AnalysisRecord {
+    const fens = new Set(game.map((item) => item.fen));
+    const shapes: Record<string, Shape[]> = {};
+    for (const [fen, list] of Object.entries(drawings)) if (fens.has(fen) && list.length > 0) shapes[fen] = list;
+    return {
+      key: pliesKey(game),
+      savedAt: Date.now(),
+      startFen: game[0].fen,
+      pgn: pgnOf(game),
+      review: state ? { status: "done", progress: state.progress, total: state.total, partial: state.partial, moves: state.moves } : null,
+      shapes,
+    };
+  }
+
+  /** `resume`: continua de onde uma revisão parcial parou, sem refazer o que já foi avaliado. */
+  async function runReview(resume = false) {
     const engine = engineRef.current;
     const snapshot = pliesRef.current;
     if (!engine || snapshot.length < 2 || enginePhase !== "ready") return;
@@ -635,15 +857,17 @@ export function ChessApp() {
     holdRef.current = true;
     const gameKey = pliesKey(snapshot);
     const total = snapshot.length - 1;
-    const moves: Record<number, MoveReview> = {};
-    const bookMatch = openings ? matchOpening(openings, snapshot.map((item) => item.fen)) : null;
+    const previous = resume ? reviewsRef.current[gameKey] : undefined;
+    const moves: Record<number, MoveReview> = previous ? { ...previous.moves } : {};
+    const startAt = previous ? Math.min(total, previous.progress) + 1 : 1;
+    const bookMatch = openings && isStandardStart(snapshot) ? matchOpening(openings, snapshot.map((item) => item.fen)) : null;
     setTab("review");
     setAltFor(null);
-    setReview({ key: gameKey, status: "running", progress: 0, total, partial: false, moves });
+    putReview({ key: gameKey, status: "running", progress: startAt - 1, total, partial: false, moves: { ...moves } });
     try {
       await engine.cancel();
-      let prevLoss = 0;
-      for (let index = 1; index <= total; index += 1) {
+      let prevLoss = moves[startAt - 1]?.winLoss ?? 0;
+      for (let index = startAt; index <= total; index += 1) {
         if (jobRef.current !== job) return;
         const beforeFen = snapshot[index - 1]?.fen;
         const ply = snapshot[index];
@@ -709,17 +933,14 @@ export function ChessApp() {
 
         moves[index] = result;
         prevLoss = result.winLoss;
-        setReview({
-          key: gameKey,
-          status: "running",
-          progress: index,
-          total,
-          partial: false,
-          moves: { ...moves },
-        });
+        putReview({ key: gameKey, status: "running", progress: index, total, partial: false, moves: { ...moves } });
+        // Ponto de retorno: se a aba fechar no meio, o que já foi avaliado fica guardado.
+        if (index % 10 === 0 && index < total) {
+          void saveAnalysis(analysisRecord(snapshot, { key: gameKey, status: "done", progress: index, total, partial: true, moves: { ...moves } }, shapesRef.current)).catch(() => undefined);
+        }
       }
       if (jobRef.current !== job) return;
-      setReview({ key: gameKey, status: "done", progress: total, total, partial: false, moves: { ...moves } });
+      putReview({ key: gameKey, status: "done", progress: total, total, partial: false, moves: { ...moves } });
     } finally {
       if (jobRef.current === job) {
         holdRef.current = false;
@@ -731,7 +952,9 @@ export function ChessApp() {
   const targets =
     selected && canMove
       ? [...new Set(new Chess(plies[cursor].fen).moves({ square: selected, verbose: true }).map((move) => move.to))]
-      : [];
+      : selected && canPremove
+        ? premoveTargets(plies[cursor].fen, selected)
+        : [];
 
   const lastMove =
     altFor == null && cursor > 0 && plies[cursor]?.from && plies[cursor]?.to
@@ -865,7 +1088,14 @@ export function ChessApp() {
                 checkSquare={kingInCheck(boardFen)}
                 arrows={arrows}
                 badge={badge}
-                interactive={canMove}
+                shapes={shapes}
+                onShape={handleShape}
+                onClearShapes={clearShapesHere}
+                drawMode={drawMode}
+                drawColor={drawColor}
+                premove={premove}
+                premoveColor={canPremove ? player : null}
+                interactive={canMove || canPremove}
                 player={mode === "analyze" ? "both" : player}
                 onSquare={selectSquare}
                 onDrop={tryMove}
@@ -943,6 +1173,40 @@ export function ChessApp() {
               </>
             )}
           </div>
+          <div className="mx-auto flex w-full max-w-xl flex-wrap items-center gap-2">
+            <button type="button" className={btn(drawMode)} aria-pressed={drawMode} onClick={() => setDrawMode((value) => !value)}>
+              Desenhar
+            </button>
+            {drawMode ? (
+              <div className="flex items-center gap-1" role="group" aria-label="Cor do desenho">
+                {(Object.keys(SHAPE_COLORS) as ShapeColor[]).map((color) => (
+                  <button
+                    key={color}
+                    type="button"
+                    aria-label={SHAPE_COLORS[color].label}
+                    aria-pressed={drawColor === color}
+                    onClick={() => setDrawColor(color)}
+                    className={`size-9 rounded-full border-2 ${drawColor === color ? "border-ink" : "border-transparent"}`}
+                    style={{ backgroundColor: SHAPE_COLORS[color].hex }}
+                  />
+                ))}
+              </div>
+            ) : null}
+            {shapes.length > 0 || Object.keys(shapesByFen).length > 0 ? (
+              <button type="button" className={btn()} onClick={() => setShapesByFen({})}>
+                Limpar desenhos
+              </button>
+            ) : null}
+            {premove ? (
+              <button type="button" className={btn()} onClick={() => setPremove(null)}>
+                Cancelar premove {premove.from}→{premove.to}
+              </button>
+            ) : null}
+          </div>
+          <p className="mx-auto w-full max-w-xl text-xs text-muted">
+            Botão direito marca uma casa; arrastar com o direito desenha uma seta (Shift vermelho, Ctrl azul, Alt amarelo). No celular, ligue “Desenhar”.
+            {premoveOn && mode === "play" ? " Na vez do adversário, escolha seu lance para agendar um premove (Esc cancela)." : ""}
+          </p>
           {summary && activeReview?.status === "done" ? (
             <p className="mx-auto w-full max-w-xl text-sm text-muted">
               Precisão {formatPercent(summary.white)} brancas · {formatPercent(summary.black)} pretas
@@ -1077,6 +1341,10 @@ export function ChessApp() {
                   ? `Você joga de ${player === "w" ? "brancas" : "pretas"} contra o perfil ${personalityById(styleId).name}. A barra mostra a avaliação real, não o humor do adversário.`
                   : "No modo análise os dois lados podem ser movidos. As setas do teclado percorrem a partida."}
               </p>
+              <label className="mt-3 flex min-h-11 items-center gap-2 text-sm text-ink">
+                <input type="checkbox" checked={premoveOn} onChange={(event) => setPremoveOn(event.target.checked)} className="size-5 accent-walnut" />
+                Permitir premove (agendar o lance na vez do adversário)
+              </label>
               {outcome && atTip ? (
                 <button type="button" className={`${btn(true)} mt-3 w-full`} onClick={() => void runReview()} disabled={reviewRunning || plies.length < 2}>
                   Avaliar partida
@@ -1127,15 +1395,37 @@ export function ChessApp() {
                   </button>
                 </div>
               ) : (
-                <button
-                  type="button"
-                  className={`${btn(true)} mb-3 w-full`}
-                  onClick={() => void runReview()}
-                  disabled={enginePhase !== "ready" || plies.length < 2}
-                >
-                  Avaliar partida
-                </button>
+                activeReview?.partial && activeReview.progress < activeReview.total ? (
+                  <div className="mb-3 grid grid-cols-2 gap-2">
+                    <button type="button" className={btn(true)} onClick={() => void runReview(true)} disabled={enginePhase !== "ready"}>
+                      Continuar ({activeReview.progress}/{activeReview.total})
+                    </button>
+                    <button type="button" className={btn()} onClick={() => void runReview()} disabled={enginePhase !== "ready"}>
+                      Refazer
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className={`${btn(true)} mb-3 w-full`}
+                    onClick={() => void runReview()}
+                    disabled={enginePhase !== "ready" || plies.length < 2}
+                  >
+                    {activeReview ? "Avaliar de novo" : "Avaliar partida"}
+                  </button>
+                )
               )}
+              {plies.length > 1 ? (
+                <div className="mb-3 grid grid-cols-2 gap-2">
+                  <button type="button" className={btn()} onClick={saveAnnotatedPgn}>
+                    Salvar PGN anotado
+                  </button>
+                  <button type="button" className={btn()} onClick={saveAnalysisFile}>
+                    Salvar análise
+                  </button>
+                </div>
+              ) : null}
+              {activeReview ? <p className="mb-3 text-xs text-muted">A análise fica guardada neste aparelho enquanto o PGN e o FEN forem os mesmos.</p> : null}
               <p className="mb-3 text-sm text-muted">
                 Cada lance ganha uma categoria com cor e símbolo, como no Chess.com. A conta usa a chance de vitória, não só os peões. Brilhante exige sacrifício de verdade; Ótimo, um lance que decide e que as alternativas não igualam.
               </p>
@@ -1213,6 +1503,20 @@ export function ChessApp() {
                 FEN
               </button>
             </div>
+            <input
+              ref={analysisFileRef}
+              type="file"
+              accept=".json,.pgn,.txt,.fen"
+              className="sr-only"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (file) void openAnalysisFile(file);
+              }}
+            />
+            <button type="button" className={`${btn()} mt-2 w-full`} onClick={() => analysisFileRef.current?.click()}>
+              Abrir arquivo (análise, PGN ou FEN)
+            </button>
             {notice ? <p className="mt-2 text-sm break-all text-muted">{notice}</p> : null}
           </Panel>
         </aside>
