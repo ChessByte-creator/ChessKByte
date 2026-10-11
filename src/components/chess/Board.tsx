@@ -37,8 +37,8 @@ type Props = {
   /** No modo desenho, o toque/clique esquerdo marca casas e arrasta setas (útil no celular). */
   drawMode?: boolean;
   drawColor?: ShapeColor;
-  /** Premove na fila (desenhado em laranja). */
-  premove?: { from: Square; to: Square } | null;
+  /** Casas dos premoves em fila (só a cor da casa muda, sem seta). */
+  premoveSquares?: Square[];
   /** Peças dessa cor podem ser pegas mesmo fora da vez, para agendar um premove. */
   premoveColor?: "w" | "b" | null;
   interactive: boolean;
@@ -69,7 +69,7 @@ export function Board({
   onClearShapes,
   drawMode = false,
   drawColor = "green",
-  premove = null,
+  premoveSquares = [],
   premoveColor = null,
   interactive,
   player,
@@ -190,7 +190,7 @@ export function Board({
             const isCheck = checkSquare === square;
             const dragging = dragFrom === square;
             const mark = squareShapes.get(square);
-            const isPremove = premove?.from === square || premove?.to === square;
+            const isPremove = premoveSquares.includes(square);
             return (
               <button
                 key={square}
@@ -288,9 +288,8 @@ export function Board({
             })}
           </svg>
         ) : null}
-        {arrowShapes.length > 0 || premove ? (
+        {arrowShapes.length > 0 ? (
           <svg className="pointer-events-none absolute inset-1 z-20" viewBox="0 0 100 100" aria-hidden="true">
-            {premove ? <ArrowShape from={premove.from} to={premove.to} flipped={flipped} color={PREMOVE_COLOR} opacity={0.85} thin /> : null}
             {arrowShapes.map((shape) => (
               <ArrowShape key={`${shape.color}-${shape.from}${shape.to}`} from={shape.from} to={shape.to as Square} flipped={flipped} color={SHAPE_COLORS[shape.color].hex} opacity={0.8} />
             ))}
@@ -339,34 +338,52 @@ function BadgeOverlay({ badge, flipped }: { badge: BoardBadge; flipped: boolean 
 
 const PREMOVE_COLOR = "#e07b1a";
 
-/** Seta cheia (haste + ponta), em coordenadas de 0 a 100. */
-function ArrowShape({ from, to, flipped, color, opacity, thin = false }: { from: Square; to: Square; flipped: boolean; color: string; opacity: number; thin?: boolean }) {
+/**
+ * Seta cheia em coordenadas de 0 a 100. Lance de cavalo (2x1) vira um "L": anda a distância maior
+ * primeiro e depois a menor, com a ponta no fim. As demais são retas.
+ */
+function ArrowShape({ from, to, flipped, color, opacity }: { from: Square; to: Square; flipped: boolean; color: string; opacity: number }) {
   const a = point(from, flipped);
   const b = point(to, flipped);
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const len = Math.hypot(dx, dy) || 1;
-  const ux = dx / len;
-  const uy = dy / len;
-  const nx = -uy;
-  const ny = ux;
-  const shaft = thin ? 1.5 : 2.3;
-  const headW = thin ? 4.4 : 6.2;
-  const headL = thin ? 3.6 : 4.8;
-  const sx = a.x + ux * 2.6;
-  const sy = a.y + uy * 2.6;
-  const tx = b.x - ux * 1.2;
-  const ty = b.y - uy * 1.2;
-  const bx = tx - ux * headL;
-  const by = ty - uy * headL;
-  const pts = [
-    [sx + (nx * shaft) / 2, sy + (ny * shaft) / 2],
-    [bx + (nx * shaft) / 2, by + (ny * shaft) / 2],
+  const cell = 12.5;
+  const dxs = Math.abs(b.x - a.x);
+  const dys = Math.abs(b.y - a.y);
+  const knight = (Math.abs(dxs - 2 * cell) < 0.5 && Math.abs(dys - cell) < 0.5) || (Math.abs(dxs - cell) < 0.5 && Math.abs(dys - 2 * cell) < 0.5);
+  const corner = knight ? (dxs > dys ? { x: b.x, y: a.y } : { x: a.x, y: b.y }) : null;
+  const shaft = 2.3;
+  const headW = 6.2;
+  const headL = 4.8;
+
+  // direção do primeiro trecho (para afastar a saída do centro) e do último (para a ponta)
+  const first = corner ?? b;
+  const fdx = first.x - a.x;
+  const fdy = first.y - a.y;
+  const flen = Math.hypot(fdx, fdy) || 1;
+  const last = corner ?? a;
+  const ldx = b.x - last.x;
+  const ldy = b.y - last.y;
+  const llen = Math.hypot(ldx, ldy) || 1;
+  const lux = ldx / llen;
+  const luy = ldy / llen;
+
+  const sx = a.x + (fdx / flen) * 2.6;
+  const sy = a.y + (fdy / flen) * 2.6;
+  const tx = b.x - lux * 1.2;
+  const ty = b.y - luy * 1.2;
+  const bx = tx - lux * headL;
+  const by = ty - luy * headL;
+  const nx = -luy;
+  const ny = lux;
+  const head = [
     [bx + (nx * headW) / 2, by + (ny * headW) / 2],
     [tx, ty],
     [bx - (nx * headW) / 2, by - (ny * headW) / 2],
-    [bx - (nx * shaft) / 2, by - (ny * shaft) / 2],
-    [sx - (nx * shaft) / 2, sy - (ny * shaft) / 2],
   ];
-  return <polygon points={pts.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join(" ")} fill={color} opacity={opacity} />;
+  const path = corner ? `M ${sx.toFixed(2)} ${sy.toFixed(2)} L ${corner.x.toFixed(2)} ${corner.y.toFixed(2)} L ${bx.toFixed(2)} ${by.toFixed(2)}` : `M ${sx.toFixed(2)} ${sy.toFixed(2)} L ${bx.toFixed(2)} ${by.toFixed(2)}`;
+  return (
+    <g opacity={opacity}>
+      <path d={path} fill="none" stroke={color} strokeWidth={shaft} strokeLinejoin="miter" strokeLinecap="butt" />
+      <polygon points={head.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join(" ")} fill={color} />
+    </g>
+  );
 }

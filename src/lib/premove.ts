@@ -52,3 +52,40 @@ export function resolvePremove(fen: string, premove: Premove): Premove | null {
     return null;
   }
 }
+
+/** Máximo de premoves em fila. */
+export const MAX_PREMOVES = 10;
+
+/**
+ * Posição "virtual" depois de executar os premoves em fila (só move as peças, sem checar a vez).
+ * É nela que o jogador escolhe o próximo premove e é ela que o tabuleiro mostra.
+ */
+export function applyPremoves(fen: string, premoves: Premove[]): string {
+  const chess = new Chess(fen);
+  for (const move of premoves) {
+    const piece = chess.get(move.from);
+    if (!piece) continue;
+    chess.remove(move.from);
+    // en passant: peão anda na diagonal para casa vazia
+    if (piece.type === "p" && move.from[0] !== move.to[0] && !chess.get(move.to)) {
+      chess.remove(`${move.to[0]}${move.from[1]}` as Square);
+    }
+    chess.remove(move.to);
+    const lastRank = piece.color === "w" ? "8" : "1";
+    const type = piece.type === "p" && move.to[1] === lastRank ? (move.promotion ?? "q") : piece.type;
+    chess.put({ type, color: piece.color }, move.to);
+    // roque: leva a torre junto
+    if (piece.type === "k" && Math.abs(move.to.charCodeAt(0) - move.from.charCodeAt(0)) === 2) {
+      const rank = move.from[1];
+      const kingside = move.to.charCodeAt(0) > move.from.charCodeAt(0);
+      const rookFrom = `${kingside ? "h" : "a"}${rank}` as Square;
+      const rookTo = `${kingside ? "f" : "d"}${rank}` as Square;
+      const rook = chess.get(rookFrom);
+      if (rook?.type === "r") {
+        chess.remove(rookFrom);
+        chess.put(rook, rookTo);
+      }
+    }
+  }
+  return chess.fen();
+}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { clearGames, countGames, deleteSource, listSources, searchGames, topFamilies, type GameFilters, type GameRecord, type GameResult, type SourceInfo } from "@/lib/games-db";
 import { importGameFile } from "@/lib/importers/game-import";
+import { GameStream } from "@/lib/importers/game-stream";
 import { pliesFromSan, type Ply } from "@/lib/game";
 import { KIND_LABEL, openingNamePt, type OpeningKind, type OpeningsIndex } from "@/lib/openings";
 
@@ -9,24 +10,16 @@ type Props = {
   onOpen: (plies: Ply[], at?: "start" | "end") => void;
 };
 
-const PAGE = 25;
+type Mode = "file" | "local";
 
+const PAGE_SIZES = [10, 25, 50, 100] as const;
 const RESULT_LABEL: Record<GameResult, string> = { "1-0": "1–0", "0-1": "0–1", "1/2-1/2": "½–½", "*": "*" };
 
 export function RepositoryScreen({ openings, onOpen }: Props) {
-  const [total, setTotal] = useState<number | null>(null);
-  const [sources, setSources] = useState<SourceInfo[]>([]);
-  const [families, setFamilies] = useState<Array<{ family: string; games: number }>>([]);
+  const [mode, setMode] = useState<Mode>("file");
+  const [pageSize, setPageSize] = useState<number>(25);
 
-  const [importing, setImporting] = useState(false);
-  const [pct, setPct] = useState<number | null>(null);
-  const [note, setNote] = useState("");
-  const [maxGames, setMaxGames] = useState(0);
-  const [minElo, setMinElo] = useState(0);
-  const [confirmClear, setConfirmClear] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
-
+  // filtros: o que está nos campos (rascunho) e o que foi aplicado na última busca
   const [player, setPlayer] = useState("");
   const [text, setText] = useState("");
   const [kind, setKind] = useState<OpeningKind | "gambit" | "all">("all");
@@ -37,24 +30,48 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
   const [yearTo, setYearTo] = useState("");
   const [source, setSource] = useState("");
 
-  const [rows, setRows] = useState<GameRecord[]>([]);
-  const [hasMore, setHasMore] = useState(false);
-  const [truncated, setTruncated] = useState(false);
-  const [searching, setSearching] = useState(false);
-  const searchSeq = useRef(0);
+  const [note, setNote] = useState("");
+  const [pageIdx, setPageIdx] = useState(0);
+  const [pages, setPages] = useState<GameRecord[][]>([]);
+  const [moreAhead, setMoreAhead] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [scan, setScan] = useState({ scanned: 0, pct: 0 });
 
-  const filters: GameFilters = {
-    player: player.trim() || undefined,
-    text: text.trim() || undefined,
-    kind,
-    result,
-    family: family || undefined,
-    minElo: elo || undefined,
-    yearFrom: Number(yearFrom) || undefined,
-    yearTo: Number(yearTo) || undefined,
-    source: source || undefined,
-  };
-  const filtersKey = JSON.stringify(filters);
+  // arquivo aberto sob demanda
+  const [fileInfo, setFileInfo] = useState<{ name: string; format: string } | null>(null);
+  const streamRef = useRef<GameStream | null>(null);
+  const bufferRef = useRef<GameRecord[]>([]);
+  const pagesRef = useRef<GameRecord[][]>([]);
+  const appliedRef = useRef<GameFilters>({});
+  const abortRef = useRef<AbortController | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // repositório local (importado para o aparelho)
+  const [total, setTotal] = useState<number | null>(null);
+  const [sources, setSources] = useState<SourceInfo[]>([]);
+  const [families, setFamilies] = useState<Array<{ family: string; games: number }>>([]);
+  const [importing, setImporting] = useState(false);
+  const [pct, setPct] = useState<number | null>(null);
+  const [maxGames, setMaxGames] = useState(0);
+  const [minElo, setMinElo] = useState(0);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const importAbort = useRef<AbortController | null>(null);
+  const importRef = useRef<HTMLInputElement>(null);
+  const localSeq = useRef(0);
+
+  function currentFilters(): GameFilters {
+    return {
+      player: player.trim() || undefined,
+      text: text.trim() || undefined,
+      kind,
+      result,
+      family: mode === "local" ? family || undefined : undefined,
+      minElo: elo || undefined,
+      yearFrom: Number(yearFrom) || undefined,
+      yearTo: Number(yearTo) || undefined,
+      source: mode === "local" ? source || undefined : undefined,
+    };
+  }
 
   const refreshMeta = useCallback(async () => {
     try {
@@ -68,37 +85,150 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
 
   useEffect(() => {
     void refreshMeta();
+    return () => {
+      abortRef.current?.abort();
+      importAbort.current?.abort();
+      streamRef.current?.close();
+    };
   }, [refreshMeta]);
 
-  const runSearch = useCallback(async (offset: number, current: GameFilters) => {
-    const seq = ++searchSeq.current;
-    setSearching(true);
-    try {
-      const found = await searchGames(current, offset, PAGE);
-      if (seq !== searchSeq.current) return;
-      setRows((previous) => (offset === 0 ? found.rows : [...previous, ...found.rows]));
-      setHasMore(found.hasMore);
-      setTruncated(found.truncated);
-    } catch {
-      if (seq === searchSeq.current) setNote("Não consegui consultar o repositório.");
-    } finally {
-      if (seq === searchSeq.current) setSearching(false);
-    }
-  }, []);
+  function resetResults() {
+    abortRef.current?.abort();
+    pagesRef.current = [];
+    bufferRef.current = [];
+    setPages([]);
+    setPageIdx(0);
+    setMoreAhead(false);
+    setNote("");
+  }
 
-  useEffect(() => {
-    if (!total) {
-      setRows([]);
-      setHasMore(false);
+  /** Página do arquivo: lê só X partidas (+1 de antecipação para saber se há próxima). */
+  async function loadFilePage(index: number, size: number) {
+    const stream = streamRef.current;
+    if (!stream) return;
+    if (pagesRef.current[index]) {
+      setPageIdx(index);
       return;
     }
-    const handle = window.setTimeout(() => void runSearch(0, JSON.parse(filtersKey) as GameFilters), 300);
-    return () => window.clearTimeout(handle);
-  }, [filtersKey, total, runSearch]);
+    const abort = new AbortController();
+    abortRef.current = abort;
+    setBusy(true);
+    setNote("");
+    try {
+      const need = size + 1 - bufferRef.current.length;
+      if (need > 0 && !stream.done) {
+        const found = await stream.take(need, appliedRef.current, abort.signal, (scanned, percent) => setScan({ scanned, pct: percent }));
+        bufferRef.current.push(...found);
+      }
+      if (abort.signal.aborted) {
+        setNote("Busca interrompida. Use “Próxima” para continuar de onde parou.");
+        return;
+      }
+      const page = bufferRef.current.splice(0, size);
+      if (page.length === 0) {
+        setNote(index === 0 ? "Nenhuma partida com esses filtros nesse arquivo." : "Fim do arquivo: não há mais partidas com esses filtros.");
+        setMoreAhead(false);
+        return;
+      }
+      pagesRef.current[index] = page;
+      setPages([...pagesRef.current]);
+      setPageIdx(index);
+      setMoreAhead(bufferRef.current.length > 0);
+    } catch (error) {
+      setNote(error instanceof Error && error.message ? error.message : "Não consegui ler o arquivo.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Página do repositório local: consulta o índice com os filtros e pula `index * X` resultados. */
+  async function loadLocalPage(index: number, size: number) {
+    const seq = ++localSeq.current;
+    setBusy(true);
+    setNote("");
+    try {
+      const found = await searchGames(appliedRef.current, index * size, size);
+      if (seq !== localSeq.current) return;
+      pagesRef.current[index] = found.rows;
+      setPages([...pagesRef.current]);
+      setPageIdx(index);
+      setMoreAhead(found.hasMore);
+      if (found.rows.length === 0) setNote(index === 0 ? "Nenhuma partida com esses filtros." : "Não há mais partidas.");
+      else if (found.truncated) setNote("A busca parou depois de 400 mil registros. Refine os filtros para ver mais.");
+    } catch {
+      if (seq === localSeq.current) setNote("Não consegui consultar o repositório.");
+    } finally {
+      if (seq === localSeq.current) setBusy(false);
+    }
+  }
+
+  /** Aplica os filtros dos campos e volta para a página 1 (no arquivo, recomeça a leitura do início). */
+  function search(size = pageSize, nextMode = mode) {
+    resetResults();
+    appliedRef.current = { ...currentFilters(), family: nextMode === "local" ? family || undefined : undefined, source: nextMode === "local" ? source || undefined : undefined };
+    if (nextMode === "file") {
+      if (!streamRef.current) {
+        setNote("Abra um arquivo de partidas para começar.");
+        return;
+      }
+      streamRef.current.restart();
+      void loadFilePage(0, size);
+    } else {
+      if (!total) {
+        setNote("O repositório local está vazio. Importe um arquivo ou use o arquivo sob demanda.");
+        return;
+      }
+      void loadLocalPage(0, size);
+    }
+  }
+
+  function goNext() {
+    if (busy) return;
+    if (mode === "file") void loadFilePage(pageIdx + 1, pageSize);
+    else void loadLocalPage(pageIdx + 1, pageSize);
+  }
+
+  function goPrev() {
+    if (busy || pageIdx === 0) return;
+    if (mode === "file") setPageIdx(pageIdx - 1);
+    else void loadLocalPage(pageIdx - 1, pageSize);
+  }
+
+  function changeMode(next: Mode) {
+    if (next === mode) return;
+    resetResults();
+    setMode(next);
+    if (next === "local") void refreshMeta();
+  }
+
+  async function openSourceFile(file: File) {
+    abortRef.current?.abort();
+    streamRef.current?.close();
+    streamRef.current = null;
+    setFileInfo(null);
+    resetResults();
+    setNote("Abrindo o arquivo…");
+    try {
+      const stream = await GameStream.open(file, openings);
+      streamRef.current = stream;
+      setFileInfo({ name: file.name, format: stream.format });
+      search(pageSize, "file");
+    } catch (error) {
+      setNote(error instanceof Error && error.message ? error.message : "Não consegui abrir esse arquivo.");
+    }
+  }
+
+  function closeSourceFile() {
+    abortRef.current?.abort();
+    streamRef.current?.close();
+    streamRef.current = null;
+    setFileInfo(null);
+    resetResults();
+  }
 
   async function importFile(file: File) {
     const abort = new AbortController();
-    abortRef.current = abort;
+    importAbort.current = abort;
     setImporting(true);
     setConfirmClear(false);
     setPct(0);
@@ -124,98 +254,167 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
     } catch (error) {
       setNote(error instanceof Error && error.message ? error.message : "Não consegui importar esse arquivo.");
     } finally {
-      abortRef.current = null;
+      importAbort.current = null;
       setPct(null);
       setImporting(false);
       await refreshMeta();
     }
   }
 
-  function open(game: GameRecord) {
-    onOpen(pliesFromSan(game.moves), "start");
-  }
+  const rows = pages[pageIdx] ?? [];
+  const hasNext = pageIdx < pages.length - 1 || moreAhead;
 
   return (
     <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
       <section className="rounded-3xl border border-line bg-paper p-4">
         <h2 className="text-sm font-semibold text-ink">Buscar partidas</h2>
         <p className="mt-1 text-sm text-muted">
-          {total == null ? "Abrindo o repositório…" : total === 0 ? "O repositório está vazio. Importe um arquivo de partidas ao lado." : `${total.toLocaleString("pt-BR")} partidas guardadas neste aparelho.`}
+          {mode === "file"
+            ? fileInfo
+              ? `Lendo ${fileInfo.name} sob demanda: ${pageSize} partidas por página, e mais ${pageSize} a cada página nova.`
+              : "Abra um arquivo de partidas ao lado. Nada é importado: o app lê só o que a página pede."
+            : total == null
+              ? "Abrindo o repositório local…"
+              : total === 0
+                ? "O repositório local está vazio. Importe um arquivo ao lado."
+                : `${total.toLocaleString("pt-BR")} partidas guardadas neste aparelho.`}
         </p>
 
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <Field label="Jogador" id="repo-player">
-            <input id="repo-player" value={player} onChange={(event) => setPlayer(event.target.value)} className={input()} placeholder="nome ou parte dele" />
-          </Field>
-          <Field label="Abertura, ECO ou evento" id="repo-text">
-            <input id="repo-text" value={text} onChange={(event) => setText(event.target.value)} className={input()} placeholder="najdorf, B90, torneio…" />
-          </Field>
-          <Field label="Tipo de abertura" id="repo-kind">
-            <select id="repo-kind" value={kind} onChange={(event) => setKind(event.target.value as typeof kind)} className={input()}>
-              <option value="all">Todos</option>
-              <option value="opening">Aberturas</option>
-              <option value="defense">Defesas</option>
-              <option value="gambit">Gambitos</option>
-            </select>
-          </Field>
-          <Field label="Resultado" id="repo-result">
-            <select id="repo-result" value={result} onChange={(event) => setResult(event.target.value as typeof result)} className={input()}>
-              <option value="all">Qualquer</option>
-              <option value="1-0">Brancas venceram</option>
-              <option value="0-1">Pretas venceram</option>
-              <option value="1/2-1/2">Empate</option>
-            </select>
-          </Field>
-          <Field label="Rating mínimo (o mais forte)" id="repo-elo">
-            <select id="repo-elo" value={elo} onChange={(event) => setElo(Number(event.target.value))} className={input()}>
-              <option value={0}>Qualquer</option>
-              {[1200, 1500, 1800, 2000, 2200, 2400, 2600].map((value) => (
-                <option key={value} value={value}>
-                  {value}+
-                </option>
-              ))}
-            </select>
-          </Field>
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="Ano de" id="repo-from">
-              <input id="repo-from" inputMode="numeric" value={yearFrom} onChange={(event) => setYearFrom(event.target.value.replace(/\D/g, "").slice(0, 4))} className={input()} />
+        <form
+          className="mt-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            search();
+          }}
+        >
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Jogador" id="repo-player">
+              <input id="repo-player" value={player} onChange={(event) => setPlayer(event.target.value)} className={input()} placeholder="nome ou parte dele" />
             </Field>
-            <Field label="Ano até" id="repo-to">
-              <input id="repo-to" inputMode="numeric" value={yearTo} onChange={(event) => setYearTo(event.target.value.replace(/\D/g, "").slice(0, 4))} className={input()} />
+            <Field label="Abertura, ECO ou evento" id="repo-text">
+              <input id="repo-text" value={text} onChange={(event) => setText(event.target.value)} className={input()} placeholder="najdorf, B90, torneio…" />
             </Field>
-          </div>
-        </div>
-
-        {sources.length > 1 ? (
-          <Field label="Arquivo de origem" id="repo-source">
-            <select id="repo-source" value={source} onChange={(event) => setSource(event.target.value)} className={input()}>
-              <option value="">Todos</option>
-              {sources.map((item) => (
-                <option key={item.name} value={item.name}>
-                  {item.name} ({item.games.toLocaleString("pt-BR")})
-                </option>
-              ))}
-            </select>
-          </Field>
-        ) : null}
-
-        {families.length > 0 ? (
-          <div className="mt-3">
-            <p className="mb-1 text-sm text-muted">Famílias mais comuns</p>
-            <div className="flex flex-wrap gap-2">
-              {families.slice(0, 16).map((item) => (
-                <button key={item.family} type="button" aria-pressed={family === item.family} className={`${chip(family === item.family)}`} onClick={() => setFamily(family === item.family ? "" : item.family)}>
-                  {openingNamePt(item.family)} · {item.games.toLocaleString("pt-BR")}
-                </button>
-              ))}
+            <Field label="Tipo de abertura" id="repo-kind">
+              <select id="repo-kind" value={kind} onChange={(event) => setKind(event.target.value as typeof kind)} className={input()}>
+                <option value="all">Todos</option>
+                <option value="opening">Aberturas</option>
+                <option value="defense">Defesas</option>
+                <option value="gambit">Gambitos</option>
+              </select>
+            </Field>
+            <Field label="Resultado" id="repo-result">
+              <select id="repo-result" value={result} onChange={(event) => setResult(event.target.value as typeof result)} className={input()}>
+                <option value="all">Qualquer</option>
+                <option value="1-0">Brancas venceram</option>
+                <option value="0-1">Pretas venceram</option>
+                <option value="1/2-1/2">Empate</option>
+              </select>
+            </Field>
+            <Field label="Rating mínimo (o mais forte)" id="repo-elo">
+              <select id="repo-elo" value={elo} onChange={(event) => setElo(Number(event.target.value))} className={input()}>
+                <option value={0}>Qualquer</option>
+                {[1200, 1500, 1800, 2000, 2200, 2400, 2600].map((value) => (
+                  <option key={value} value={value}>
+                    {value}+
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Ano de" id="repo-from">
+                <input id="repo-from" inputMode="numeric" value={yearFrom} onChange={(event) => setYearFrom(event.target.value.replace(/\D/g, "").slice(0, 4))} className={input()} />
+              </Field>
+              <Field label="Ano até" id="repo-to">
+                <input id="repo-to" inputMode="numeric" value={yearTo} onChange={(event) => setYearTo(event.target.value.replace(/\D/g, "").slice(0, 4))} className={input()} />
+              </Field>
             </div>
+            <Field label="Partidas por página" id="repo-size">
+              <select
+                id="repo-size"
+                value={pageSize}
+                onChange={(event) => {
+                  const size = Number(event.target.value);
+                  setPageSize(size);
+                  if (pages.length > 0) search(size);
+                }}
+                className={input()}
+              >
+                {PAGE_SIZES.map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {mode === "local" && sources.length > 1 ? (
+              <Field label="Arquivo de origem" id="repo-source">
+                <select id="repo-source" value={source} onChange={(event) => setSource(event.target.value)} className={input()}>
+                  <option value="">Todos</option>
+                  {sources.map((item) => (
+                    <option key={item.name} value={item.name}>
+                      {item.name} ({item.games.toLocaleString("pt-BR")})
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            ) : null}
           </div>
+
+          {mode === "local" && families.length > 0 ? (
+            <div className="mt-3">
+              <p className="mb-1 text-sm text-muted">Famílias mais comuns</p>
+              <div className="flex flex-wrap gap-2">
+                {families.slice(0, 16).map((item) => (
+                  <button key={item.family} type="button" aria-pressed={family === item.family} className={chip(family === item.family)} onClick={() => setFamily(family === item.family ? "" : item.family)}>
+                    {openingNamePt(item.family)} · {item.games.toLocaleString("pt-BR")}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <button type="submit" className={btn(true)} disabled={busy}>
+              Buscar
+            </button>
+            {busy ? (
+              <button type="button" className={btn()} onClick={() => abortRef.current?.abort()}>
+                Parar
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={btn()}
+                onClick={() => {
+                  setPlayer("");
+                  setText("");
+                  setKind("all");
+                  setResult("all");
+                  setFamily("");
+                  setElo(0);
+                  setYearFrom("");
+                  setYearTo("");
+                  setSource("");
+                }}
+              >
+                Limpar filtros
+              </button>
+            )}
+          </div>
+        </form>
+
+        {busy && mode === "file" ? (
+          <p className="mt-3 text-sm text-muted">
+            Procurando… {scan.scanned.toLocaleString("pt-BR")} partidas lidas ({Math.round(scan.pct)}% do arquivo)
+          </p>
         ) : null}
+        {busy && mode === "local" ? <p className="mt-3 text-sm text-muted">Buscando…</p> : null}
+        {note ? <p className="mt-3 text-sm text-ink">{note}</p> : null}
 
         <ul className="mt-4 flex flex-col gap-2">
-          {rows.map((game) => (
-            <li key={game.id}>
-              <button type="button" onClick={() => open(game)} className="w-full rounded-lg bg-cream px-3 py-2 text-left text-sm hover:bg-soft">
+          {rows.map((game, index) => (
+            <li key={`${pageIdx}-${index}`}>
+              <button type="button" onClick={() => onOpen(pliesFromSan(game.moves), "start")} className="w-full rounded-lg bg-cream px-3 py-2 text-left text-sm hover:bg-soft">
                 <span className="flex items-center justify-between gap-3">
                   <span className="min-w-0 truncate text-ink">
                     {game.white}
@@ -233,94 +432,139 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
             </li>
           ))}
         </ul>
-        {total && !searching && rows.length === 0 ? <p className="mt-3 text-sm text-muted">Nenhuma partida com esses filtros.</p> : null}
-        {searching ? <p className="mt-3 text-sm text-muted">Buscando…</p> : null}
-        {truncated ? <p className="mt-2 text-xs text-muted">A busca parou depois de 400 mil registros. Refine os filtros para ver mais.</p> : null}
-        {hasMore && !searching ? (
-          <button type="button" className={`${btn()} mt-3 w-full`} onClick={() => void runSearch(rows.length, filters)}>
-            Carregar mais
-          </button>
+
+        {pages.length > 0 ? (
+          <nav className="mt-4 flex items-center justify-between gap-2" aria-label="Páginas">
+            <button type="button" className={btn()} onClick={goPrev} disabled={busy || pageIdx === 0}>
+              Anterior
+            </button>
+            <span className="text-sm text-muted">Página {pageIdx + 1}</span>
+            <button type="button" className={btn()} onClick={goNext} disabled={busy || !hasNext}>
+              Próxima
+            </button>
+          </nav>
         ) : null}
       </section>
 
       <aside className="flex flex-col gap-3">
         <section className="rounded-3xl border border-line bg-paper p-4">
-          <h2 className="mb-3 text-sm font-semibold text-ink">Importar partidas</h2>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".pgn,.txt,.zst,.gz,.db,.sqlite,.sqlite3"
-            className="sr-only"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              event.target.value = "";
-              if (file) void importFile(file);
-            }}
-          />
-          <label className="mb-1 block text-sm text-muted" htmlFor="repo-max">
-            Quantas partidas importar
-          </label>
-          <select id="repo-max" value={maxGames} disabled={importing} onChange={(event) => setMaxGames(Number(event.target.value))} className={input()}>
-            <option value={0}>Todas do arquivo</option>
-            <option value={1000000}>Até 1 milhão</option>
-            <option value={200000}>Até 200 mil</option>
-            <option value={50000}>Até 50 mil</option>
-            <option value={10000}>Até 10 mil</option>
-          </select>
-          <label className="mt-3 mb-1 block text-sm text-muted" htmlFor="repo-minelo">
-            Só partidas com rating mínimo
-          </label>
-          <select id="repo-minelo" value={minElo} disabled={importing} onChange={(event) => setMinElo(Number(event.target.value))} className={input()}>
-            <option value={0}>Sem filtro</option>
-            {[1500, 1800, 2000, 2200, 2400].map((value) => (
-              <option key={value} value={value}>
-                {value}+
-              </option>
-            ))}
-          </select>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            {importing ? (
-              <button type="button" className={btn()} onClick={() => abortRef.current?.abort()}>
-                Cancelar
-              </button>
-            ) : (
-              <button type="button" className={btn(true)} onClick={() => fileRef.current?.click()}>
-                Importar
-              </button>
-            )}
-            <button
-              type="button"
-              className={btn()}
-              disabled={!total || importing}
-              onClick={() => {
-                if (!confirmClear) {
-                  setConfirmClear(true);
-                  return;
-                }
-                void clearGames().then(async () => {
-                  setConfirmClear(false);
-                  setNote("Repositório apagado.");
-                  setFamily("");
-                  setSource("");
-                  await refreshMeta();
-                });
-              }}
-            >
-              {confirmClear ? "Confirmar" : "Limpar tudo"}
+          <h2 className="mb-3 text-sm font-semibold text-ink">Fonte das partidas</h2>
+          <div className="grid grid-cols-2 gap-2" role="group" aria-label="Fonte">
+            <button type="button" className={btn(mode === "file")} aria-pressed={mode === "file"} onClick={() => changeMode("file")}>
+              Arquivo
+            </button>
+            <button type="button" className={btn(mode === "local")} aria-pressed={mode === "local"} onClick={() => changeMode("local")}>
+              No aparelho
             </button>
           </div>
-          {importing && pct != null ? (
-            <div className="mt-3 h-2 overflow-hidden rounded-full bg-soft" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}>
-              <div className="h-full bg-walnut transition-[width] duration-300" style={{ width: `${pct}%` }} />
-            </div>
-          ) : null}
-          {note ? <p className="mt-3 text-sm text-ink">{note}</p> : null}
-          <p className="mt-3 text-sm text-muted">
-            Aceita PGN em .pgn, .pgn.zst ou .pgn.gz (como as bases mensais da Lichess), sem limite de tamanho: o arquivo é lido aos poucos. Também aceita bancos SQLite (.db) com coluna pgn, ou white e moves. O Byte identifica a abertura de cada partida e classifica em abertura, defesa ou gambito.
-          </p>
+
+          {mode === "file" ? (
+            <>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".pgn,.txt,.zst,.gz,.db,.sqlite,.sqlite3"
+                className="sr-only"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (file) void openSourceFile(file);
+                }}
+              />
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button type="button" className={btn(true)} onClick={() => fileRef.current?.click()} disabled={busy}>
+                  {fileInfo ? "Trocar arquivo" : "Abrir arquivo"}
+                </button>
+                <button type="button" className={btn()} onClick={closeSourceFile} disabled={!fileInfo}>
+                  Fechar
+                </button>
+              </div>
+              {fileInfo ? (
+                <p className="mt-3 text-sm text-ink">
+                  {fileInfo.name} · {streamRef.current?.scanned.toLocaleString("pt-BR") ?? 0} partidas lidas até agora
+                </p>
+              ) : null}
+              <p className="mt-3 text-sm text-muted">
+                Aceita PGN em .pgn, .pgn.zst ou .pgn.gz (as bases mensais da Lichess), sem limite de tamanho, e bancos SQLite (.db) com coluna pgn, ou white e moves. Cada busca recomeça do início do arquivo; “Próxima” continua de onde parou.
+              </p>
+            </>
+          ) : (
+            <>
+              <input
+                ref={importRef}
+                type="file"
+                accept=".pgn,.txt,.zst,.gz,.db,.sqlite,.sqlite3"
+                className="sr-only"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (file) void importFile(file);
+                }}
+              />
+              <label className="mt-3 mb-1 block text-sm text-muted" htmlFor="repo-max">
+                Quantas partidas importar
+              </label>
+              <select id="repo-max" value={maxGames} disabled={importing} onChange={(event) => setMaxGames(Number(event.target.value))} className={input()}>
+                <option value={0}>Todas do arquivo</option>
+                <option value={1000000}>Até 1 milhão</option>
+                <option value={200000}>Até 200 mil</option>
+                <option value={50000}>Até 50 mil</option>
+                <option value={10000}>Até 10 mil</option>
+              </select>
+              <label className="mt-3 mb-1 block text-sm text-muted" htmlFor="repo-minelo">
+                Só partidas com rating mínimo
+              </label>
+              <select id="repo-minelo" value={minElo} disabled={importing} onChange={(event) => setMinElo(Number(event.target.value))} className={input()}>
+                <option value={0}>Sem filtro</option>
+                {[1500, 1800, 2000, 2200, 2400].map((value) => (
+                  <option key={value} value={value}>
+                    {value}+
+                  </option>
+                ))}
+              </select>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {importing ? (
+                  <button type="button" className={btn()} onClick={() => importAbort.current?.abort()}>
+                    Cancelar
+                  </button>
+                ) : (
+                  <button type="button" className={btn(true)} onClick={() => importRef.current?.click()}>
+                    Importar
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={btn()}
+                  disabled={!total || importing}
+                  onClick={() => {
+                    if (!confirmClear) {
+                      setConfirmClear(true);
+                      return;
+                    }
+                    void clearGames().then(async () => {
+                      setConfirmClear(false);
+                      setNote("Repositório apagado.");
+                      setFamily("");
+                      setSource("");
+                      resetResults();
+                      await refreshMeta();
+                    });
+                  }}
+                >
+                  {confirmClear ? "Confirmar" : "Limpar tudo"}
+                </button>
+              </div>
+              {importing && pct != null ? (
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-soft" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}>
+                  <div className="h-full bg-walnut transition-[width] duration-300" style={{ width: `${pct}%` }} />
+                </div>
+              ) : null}
+              <p className="mt-3 text-sm text-muted">Importar guarda as partidas no aparelho e deixa a busca instantânea, mas leva tempo em arquivos grandes. Para ver rápido, prefira “Arquivo”.</p>
+            </>
+          )}
         </section>
 
-        {sources.length > 0 ? (
+        {mode === "local" && sources.length > 0 ? (
           <section className="rounded-3xl border border-line bg-paper p-4">
             <h2 className="mb-3 text-sm font-semibold text-ink">Arquivos importados</h2>
             <ul className="flex flex-col gap-2">
@@ -336,6 +580,7 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
                     onClick={() => {
                       void deleteSource(item.name).then(() => {
                         setSource("");
+                        resetResults();
                         return refreshMeta();
                       });
                     }}
@@ -354,7 +599,7 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
 
 function Field({ label, id, children }: { label: string; id: string; children: React.ReactNode }) {
   return (
-    <div className="mt-0">
+    <div>
       <label className="mb-1 block text-sm text-muted" htmlFor={id}>
         {label}
       </label>

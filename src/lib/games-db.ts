@@ -154,6 +154,12 @@ function norm(value: string) {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
+/** Testa uma partida contra os filtros (usado na busca do repositório e na leitura sob demanda). */
+export function gameMatcher(filters: GameFilters): (game: GameRecord) => boolean {
+  const text = filters.text ? norm(filters.text.trim()) : "";
+  return (game) => matches(game, filters, text);
+}
+
 function matches(game: GameRecord, f: GameFilters, text: string) {
   if (f.player) {
     const q = norm(f.player);

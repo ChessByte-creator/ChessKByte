@@ -37,7 +37,7 @@ import { loadOpenings, matchOpening, KIND_LABEL, openingNamePt, type OpeningsInd
 import { isRecapture, judgePly, needsAfterSearch, type MoveReview, type ReviewState } from "@/lib/review";
 import { loadAnalysis, saveAnalysis, type AnalysisRecord } from "@/lib/analysis-store";
 import { buildAnalysisJson, buildAnnotatedPgn, downloadText, parseAnalysisFile } from "@/lib/analysis-file";
-import { premoveTargets, resolvePremove, type Premove } from "@/lib/premove";
+import { MAX_PREMOVES, applyPremoves, premoveTargets, resolvePremove, type Premove } from "@/lib/premove";
 import { SHAPE_COLORS, toggleShape, type Shape, type ShapeColor } from "@/lib/shapes";
 import { PERSONALITIES, personalityById, pickStyledMove, type PersonalityId } from "@/lib/style";
 import { PuzzleScreen } from "@/components/chess/PuzzleScreen";
@@ -104,7 +104,7 @@ export function ChessApp() {
   const [shapesByFen, setShapesByFen] = useState<Record<string, Shape[]>>({});
   const [drawMode, setDrawMode] = useState(false);
   const [drawColor, setDrawColor] = useState<ShapeColor>("green");
-  const [premove, setPremove] = useState<Premove | null>(null);
+  const [premoves, setPremoves] = useState<Premove[]>([]);
   const [premoveOn, setPremoveOn] = useState(true);
   const [searchGen, setSearchGen] = useState(0);
   const [openings, setOpenings] = useState<OpeningsIndex | null>(null);
@@ -158,6 +158,8 @@ export function ChessApp() {
   const sideView = view === "puzzle" || view === "library" || view === "repo";
   const myTurn = new Chess(plies[cursor]?.fen ?? plies[0].fen).turn() === player;
   const canPremove = premoveOn && view === "match" && mode === "play" && atTip && !outcome && !myTurn && !reviewRunning && enginePhase === "ready";
+  /** Com premoves em fila, o tabuleiro mostra a posição como ficará depois deles. */
+  const virtualFen = canPremove && premoves.length > 0 ? applyPremoves(plies[cursor].fen, premoves) : null;
 
   const book = useMemo(() => (openings && isStandardStart(plies) ? matchOpening(openings, plies.map((ply) => ply.fen)) : null), [openings, plies]);
   const openingNow = book ? book.names[Math.min(cursor, book.names.length - 1)] : null;
@@ -372,7 +374,7 @@ export function ChessApp() {
       } else if (event.key === "f" || event.key === "F") {
         setFlipped((value) => !value);
       } else if (event.key === "Escape") {
-        setPremove(null);
+        setPremoves([]);
         setSelected(null);
       }
     }
@@ -521,51 +523,65 @@ export function ChessApp() {
   }
 
   useEffect(() => {
-    if (!premove) return;
+    if (premoves.length === 0) return;
     if (view !== "match" || mode !== "play" || !premoveOn) {
-      setPremove(null);
+      setPremoves([]);
       return;
     }
     if (altFor != null || cursor !== plies.length - 1) {
-      setPremove(null);
+      setPremoves([]);
       return;
     }
     const last = plies[plies.length - 1];
     if (resultText(last.fen)) {
-      setPremove(null);
+      setPremoves([]);
       return;
     }
     if (new Chess(last.fen).turn() !== player) return;
-    const resolved = resolvePremove(last.fen, premove);
+    const resolved = resolvePremove(last.fen, premoves[0]);
     const handle = window.setTimeout(() => {
-      setPremove(null);
-      if (resolved) commit(resolved.from, resolved.to, resolved.promotion);
-      else setRemark("Premove cancelado: o lance deixou de ser legal.");
+      if (resolved) {
+        setPremoves((current) => current.slice(1));
+        commit(resolved.from, resolved.to, resolved.promotion);
+      } else {
+        setPremoves([]);
+        setRemark("Premoves cancelados: um lance deixou de ser legal.");
+      }
     }, 140);
     return () => window.clearTimeout(handle);
-  }, [altFor, commit, cursor, mode, plies, player, premove, premoveOn, view]);
+  }, [altFor, commit, cursor, mode, plies, player, premoves, premoveOn, view]);
 
-  /** Na vez do adversário: escolher uma peça sua e uma casa agenda o premove. */
+  /** Na vez do adversário: cada lance escolhido entra na fila (até MAX_PREMOVES), sempre sobre a posição virtual. */
   function selectForPremove(square: Square) {
-    const fen = pliesRef.current[pliesRef.current.length - 1]?.fen;
-    if (!fen) return;
-    if (selected && premoveTargets(fen, selected).includes(square)) {
-      setPremove({ from: selected, to: square });
-      setSelected(null);
-      return;
+    const real = pliesRef.current[pliesRef.current.length - 1]?.fen;
+    if (!real) return;
+    const base = applyPremoves(real, premoves);
+    if (selected) {
+      if (premoveTargets(base, selected).includes(square)) {
+        if (premoves.length < MAX_PREMOVES) setPremoves([...premoves, { from: selected, to: square }]);
+        else setRemark(`Limite de ${MAX_PREMOVES} premoves.`);
+        setSelected(null);
+        return;
+      }
+      if (square === selected) {
+        setSelected(null);
+        return;
+      }
     }
-    if (new Chess(fen).get(square)?.color === player) {
+    if (new Chess(base).get(square)?.color === player) {
       setSelected(square);
       return;
     }
     setSelected(null);
-    setPremove(null);
+    if (!selected) setPremoves([]);
   }
 
   function tryMove(from: Square, to: Square) {
     if (canPremove) {
-      const fen = pliesRef.current[pliesRef.current.length - 1]?.fen;
-      if (fen && premoveTargets(fen, from).includes(to)) setPremove({ from, to });
+      const real = pliesRef.current[pliesRef.current.length - 1]?.fen;
+      if (real && premoves.length < MAX_PREMOVES && premoveTargets(applyPremoves(real, premoves), from).includes(to)) {
+        setPremoves([...premoves, { from, to }]);
+      }
       setSelected(null);
       return;
     }
@@ -623,7 +639,7 @@ export function ChessApp() {
   function resetTo(next: Ply[], nextMode: Mode, color: "w" | "b") {
     haltReview();
     setShapesByFen({});
-    setPremove(null);
+    setPremoves([]);
     setPlies(next);
     setCursor(next.length - 1);
     setMode(nextMode);
@@ -639,7 +655,7 @@ export function ChessApp() {
 
   function openView(next: View) {
     if (next === viewRef.current) return;
-    setPremove(null);
+    setPremoves([]);
     // O duelo usa o motor; as outras abas deixam a revisão terminar em segundo plano.
     if (next === "duel") haltReview();
     if (viewRef.current === "match") {
@@ -953,7 +969,7 @@ export function ChessApp() {
     selected && canMove
       ? [...new Set(new Chess(plies[cursor].fen).moves({ square: selected, verbose: true }).map((move) => move.to))]
       : selected && canPremove
-        ? premoveTargets(plies[cursor].fen, selected)
+        ? premoveTargets(virtualFen ?? plies[cursor].fen, selected)
         : [];
 
   const lastMove =
@@ -1080,7 +1096,7 @@ export function ChessApp() {
             <EvalBar evalWhite={shownEval} flipped={flipped} />
             <div className="relative min-w-0 flex-1">
               <Board
-                fen={boardFen}
+                fen={virtualFen ?? boardFen}
                 flipped={flipped}
                 selected={selected}
                 targets={targets}
@@ -1093,7 +1109,7 @@ export function ChessApp() {
                 onClearShapes={clearShapesHere}
                 drawMode={drawMode}
                 drawColor={drawColor}
-                premove={premove}
+                premoveSquares={premoves.flatMap((item) => [item.from, item.to])}
                 premoveColor={canPremove ? player : null}
                 interactive={canMove || canPremove}
                 player={mode === "analyze" ? "both" : player}
@@ -1197,15 +1213,15 @@ export function ChessApp() {
                 Limpar desenhos
               </button>
             ) : null}
-            {premove ? (
-              <button type="button" className={btn()} onClick={() => setPremove(null)}>
-                Cancelar premove {premove.from}→{premove.to}
+            {premoves.length > 0 ? (
+              <button type="button" className={btn()} onClick={() => setPremoves([])}>
+                Cancelar premoves ({premoves.length})
               </button>
             ) : null}
           </div>
           <p className="mx-auto w-full max-w-xl text-xs text-muted">
             Botão direito marca uma casa; arrastar com o direito desenha uma seta (Shift vermelho, Ctrl azul, Alt amarelo). No celular, ligue “Desenhar”.
-            {premoveOn && mode === "play" ? " Na vez do adversário, escolha seu lance para agendar um premove (Esc cancela)." : ""}
+            {premoveOn && mode === "play" ? " Na vez do adversário, escolha seu lance para agendar premoves em fila, até 10 (Esc cancela)." : ""}
           </p>
           {summary && activeReview?.status === "done" ? (
             <p className="mx-auto w-full max-w-xl text-sm text-muted">
@@ -1343,7 +1359,7 @@ export function ChessApp() {
               </p>
               <label className="mt-3 flex min-h-11 items-center gap-2 text-sm text-ink">
                 <input type="checkbox" checked={premoveOn} onChange={(event) => setPremoveOn(event.target.checked)} className="size-5 accent-walnut" />
-                Permitir premove (agendar o lance na vez do adversário)
+                Permitir premoves (agendar lances na vez do adversário)
               </label>
               {outcome && atTip ? (
                 <button type="button" className={`${btn(true)} mt-3 w-full`} onClick={() => void runReview()} disabled={reviewRunning || plies.length < 2}>

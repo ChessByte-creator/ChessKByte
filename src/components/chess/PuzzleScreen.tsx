@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Chess, type Square } from "chess.js";
 import { Board, type BoardArrow } from "@/components/chess/Board";
-import { clearPuzzles, countPuzzles, randomNear } from "@/lib/puzzle-db";
-import { importPuzzleFile } from "@/lib/importers/puzzle-import";
 import { PuzzleStream, type PuzzleFilter } from "@/lib/importers/puzzle-stream";
 import { kingInCheck } from "@/lib/game";
 import {
@@ -54,14 +52,7 @@ export function PuzzleScreen() {
   const [hinted, setHinted] = useState(false);
   const [line, setLine] = useState("Carregando puzzles…");
   const [detail, setDetail] = useState("");
-  const [dbCount, setDbCount] = useState(0);
   const [theme, setTheme] = useState<ThemeFilter>("all");
-  const [importing, setImporting] = useState(false);
-  const [importNote, setImportNote] = useState("");
-  const [importPct, setImportPct] = useState<number | null>(null);
-  const [importLimit, setImportLimit] = useState(0);
-  const importAbort = useRef<AbortController | null>(null);
-  const [confirmClear, setConfirmClear] = useState(false);
   const [ratingDraft, setRatingDraft] = useState("1000");
   const [autoNext, setAutoNext] = useState(true);
   const [lazyName, setLazyName] = useState("");
@@ -81,7 +72,6 @@ export function PuzzleScreen() {
   const stepRef = useRef(step);
   const hintedRef = useRef(false);
   const themeRef = useRef(theme);
-  const fileRef = useRef<HTMLInputElement>(null);
   profileRef.current = profile;
   puzzleRef.current = puzzle;
   fenRef.current = fen;
@@ -117,18 +107,9 @@ export function PuzzleScreen() {
     setDetail(goalLine(next, 0));
   }
 
-  async function choose(current: PuzzleProfile, count: number, filter: ThemeFilter) {
-    const avoid = new Set(current.recent);
-    if (count > 0) {
-      try {
-        const fromDb = await randomNear(current.rating, avoid, filter);
-        if (fromDb) return fromDb;
-      } catch {
-        /* fall back to the starter pack */
-      }
-    }
-    if (count > 0 && filter !== "all") return null;
-    return pickFromList(BUILTIN_PUZZLES, current.rating, avoid, filter);
+  /** Sem arquivo aberto, sorteia do pacote inicial de mates. */
+  function choose(current: PuzzleProfile, filter: ThemeFilter) {
+    return pickFromList(BUILTIN_PUZZLES, current.rating, new Set(current.recent), filter);
   }
 
   /** Lê do arquivo só o que falta para manter a fila (uma leitura por vez). */
@@ -241,11 +222,10 @@ export function PuzzleScreen() {
       setPhase("failed");
       return;
     }
-    const count = dbCount;
-    const next = await choose(profileRef.current, count, themeRef.current);
+    const next = choose(profileRef.current, themeRef.current);
     if (!next) {
       setLine("Nenhum puzzle com esse filtro.");
-      setDetail("Importe mais puzzles ou escolha outro tema.");
+      setDetail("Abra um arquivo de puzzles para ler sob demanda, ou escolha outro tema.");
       setPhase("failed");
       return;
     }
@@ -253,20 +233,10 @@ export function PuzzleScreen() {
   }
 
   useEffect(() => {
-    let alive = true;
     const saved = loadProfile();
     remember(saved);
-    void (async () => {
-      const count = await countPuzzles().catch(() => 0);
-      if (!alive) return;
-      setDbCount(count);
-      const next = await choose(saved, count, "all");
-      if (!alive || !next) return;
-      begin(next);
-    })();
-    return () => {
-      alive = false;
-    };
+    const next = choose(saved, "all");
+    if (next) begin(next);
     // Boot once. remember/choose/begin are stable enough for this mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -537,7 +507,7 @@ export function PuzzleScreen() {
               Ver solução
             </button>
           ) : null}
-          <button type="button" className={btn(true)} onClick={() => void goNext()} disabled={phase === "loading" || phase === "setup" || phase === "reply" || importing}>
+          <button type="button" className={btn(true)} onClick={() => void goNext()} disabled={phase === "loading" || phase === "setup" || phase === "reply"}>
             Próximo
           </button>
         </div>
@@ -582,11 +552,11 @@ export function PuzzleScreen() {
         </section>
 
         <section className="rounded-3xl border border-line bg-paper p-4">
-          <h2 className="mb-3 text-sm font-semibold text-ink">Base de puzzles</h2>
+          <h2 className="mb-1 text-sm font-semibold text-ink">Puzzles</h2>
           <p className="text-sm text-muted">
-            {dbCount > 0
-              ? `${dbCount.toLocaleString("pt-BR")} puzzles importados. O próximo sai perto do seu rating.`
-              : "Pacote inicial de mates. Importe um CSV da Lichess, ou um JSON, para usar a sua base."}
+            {lazyName
+              ? "Lendo o arquivo sob demanda: o app procura só os puzzles dos filtros e lê mais um a cada puzzle resolvido."
+              : "Pacote inicial de mates. Abra um arquivo (CSV da Lichess, .zst, .gz ou .db) para ler sob demanda, sem importar nada."}
           </p>
           {puzzle && puzzle.themes.length > 0 ? (
             <p className="mt-2 text-sm text-ink">{puzzle.themes.slice(0, 3).map(themeLabel).join(" · ")} · {puzzle.rating}</p>
@@ -606,85 +576,6 @@ export function PuzzleScreen() {
               </option>
             ))}
           </select>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".csv,.tsv,.json,.txt,.zst,.gz,.db,.sqlite,.sqlite3"
-            className="sr-only"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              event.target.value = "";
-              if (file) void importFile(file);
-            }}
-          />
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            {importing ? (
-              <button type="button" className={btn()} onClick={() => importAbort.current?.abort()}>
-                Cancelar importação
-              </button>
-            ) : (
-              <button type="button" className={btn(true)} onClick={() => fileRef.current?.click()}>
-                Importar
-              </button>
-            )}
-            <button type="button" className={btn()} onClick={downloadSample}>
-              Exemplo CSV
-            </button>
-            <button
-              type="button"
-              className={btn()}
-              disabled={dbCount === 0 || importing}
-              onClick={() => {
-                if (!confirmClear) {
-                  setConfirmClear(true);
-                  return;
-                }
-                void clearPuzzles()
-                  .then(() => {
-                    setDbCount(0);
-                    setConfirmClear(false);
-                    setImportNote("Base importada apagada. Voltamos ao pacote inicial.");
-                  })
-                  .catch(() => setImportNote("Não consegui apagar a base."));
-              }}
-            >
-              {confirmClear ? "Confirmar limpar" : "Limpar base"}
-            </button>
-            <button type="button" className={btn()} onClick={() => void goNext()} disabled={importing || phase === "setup" || phase === "reply"}>
-              Sortear
-            </button>
-          </div>
-          <label className="mt-3 mb-1 block text-sm text-muted" htmlFor="import-limit">
-            Quantos puzzles importar
-          </label>
-          <select
-            id="import-limit"
-            value={importLimit}
-            disabled={importing}
-            onChange={(event) => setImportLimit(Number(event.target.value))}
-            className="min-h-11 w-full rounded-lg border border-line bg-cream px-2 text-sm"
-          >
-            <option value={0}>Todos do arquivo</option>
-            <option value={1000000}>Até 1 milhão</option>
-            <option value={250000}>Até 250 mil</option>
-            <option value={50000}>Até 50 mil</option>
-          </select>
-          {importing && importPct != null ? (
-            <div className="mt-3 h-2 overflow-hidden rounded-full bg-soft" role="progressbar" aria-valuenow={Math.round(importPct)} aria-valuemin={0} aria-valuemax={100}>
-              <div className="h-full bg-walnut transition-[width] duration-300" style={{ width: `${importPct}%` }} />
-            </div>
-          ) : null}
-          <p className="mt-3 text-sm text-muted">
-            Sem limite de tamanho. Aceita o CSV da Lichess em .csv, .csv.zst ou .csv.gz, JSON e bancos SQLite (.db) com colunas FEN e Moves. O primeiro lance é do adversário; você responde em seguida. Arquivos .db são lidos inteiros na memória (até 1,5 GB).
-          </p>
-          {importNote ? <p className="mt-2 text-sm text-ink">{importNote}</p> : null}
-        </section>
-
-        <section className="rounded-3xl border border-line bg-paper p-4">
-          <h2 className="mb-1 text-sm font-semibold text-ink">Ler sob demanda (arquivo grande)</h2>
-          <p className="text-sm text-muted">
-            Sem importar nada: o app lê o arquivo só até achar {LAZY_TARGET} puzzles dentro dos filtros e, a cada puzzle resolvido, lê mais um. Aceita .csv, .zst, .gz e .db.
-          </p>
           <div className="mt-3 grid grid-cols-2 gap-2">
             <div>
               <label className="mb-1 block text-sm text-muted" htmlFor="lazy-min">
@@ -699,7 +590,6 @@ export function PuzzleScreen() {
               <input id="lazy-max" inputMode="numeric" value={lazyMax} onChange={(event) => setLazyMax(event.target.value.replace(/\D/g, "").slice(0, 4))} className="min-h-11 w-full rounded-lg border border-line bg-cream px-2 text-sm" />
             </div>
           </div>
-          <p className="mt-2 text-xs text-muted">O tema é o escolhido acima em “Tema do próximo”.</p>
           <label className="mt-2 flex min-h-11 items-center gap-2 text-sm text-ink">
             <input type="checkbox" checked={lazyRestart} onChange={(event) => setLazyRestart(event.target.checked)} className="size-5 accent-walnut" />
             Recomeçar do início (senão retoma de onde parou)
@@ -716,15 +606,21 @@ export function PuzzleScreen() {
             }}
           />
           <div className="mt-2 grid grid-cols-2 gap-2">
-            <button type="button" className={btn(true)} onClick={() => lazyFileRef.current?.click()} disabled={importing}>
-              {lazyName ? "Trocar arquivo" : "Escolher arquivo"}
+            <button type="button" className={btn(true)} onClick={() => lazyFileRef.current?.click()}>
+              {lazyName ? "Trocar arquivo" : "Abrir arquivo"}
             </button>
             <button type="button" className={btn()} onClick={applyLazyFilters} disabled={!lazyName}>
               Aplicar filtros
             </button>
+            <button type="button" className={btn()} onClick={() => void goNext()} disabled={phase === "setup" || phase === "reply"}>
+              Sortear
+            </button>
+            <button type="button" className={btn()} onClick={downloadSample}>
+              Exemplo CSV
+            </button>
             {lazyName ? (
-              <button type="button" className={`${btn()} col-span-2`} onClick={() => stopLazy("Leitura sob demanda encerrada. Voltamos à base local.")}>
-                Parar e voltar à base local
+              <button type="button" className={`${btn()} col-span-2`} onClick={() => stopLazy("Arquivo fechado. Voltamos ao pacote inicial.")}>
+                Fechar arquivo
               </button>
             ) : null}
           </div>
@@ -734,43 +630,11 @@ export function PuzzleScreen() {
             </p>
           ) : null}
           {lazyNote ? <p className="mt-2 text-sm text-muted">{lazyNote}</p> : null}
+          <p className="mt-3 text-xs text-muted">O primeiro lance do puzzle é do adversário; você responde em seguida. Arquivos .db são lidos inteiros na memória (até 1,5 GB).</p>
         </section>
       </aside>
     </div>
   );
-
-  async function importFile(file: File) {
-    const abort = new AbortController();
-    importAbort.current = abort;
-    setImporting(true);
-    setConfirmClear(false);
-    setImportPct(0);
-    setImportNote("Lendo o arquivo…");
-    try {
-      const result = await importPuzzleFile(file, {
-        maxPuzzles: importLimit,
-        signal: abort.signal,
-        onProgress: ({ added, percent, phase }) => {
-          setImportPct(percent);
-          setImportNote(`${phase} ${added.toLocaleString("pt-BR")} puzzles`);
-        },
-      });
-      setDbCount(await countPuzzles());
-      const cut = abort.signal.aborted ? " (cancelado, o que já entrou foi mantido)" : result.stopped ? " (parou no limite escolhido)" : "";
-      setImportNote(
-        result.added > 0
-          ? `${result.added.toLocaleString("pt-BR")} puzzles importados${result.skipped ? ` · ${result.skipped.toLocaleString("pt-BR")} linhas ignoradas` : ""}${cut}.`
-          : "Não reconheci puzzles nesse arquivo.",
-      );
-    } catch (error) {
-      setImportNote(error instanceof Error && error.message ? error.message : "Não consegui importar esse arquivo.");
-      void countPuzzles().then(setDbCount).catch(() => undefined);
-    } finally {
-      importAbort.current = null;
-      setImportPct(null);
-      setImporting(false);
-    }
-  }
 }
 
 function turnLine(puzzle: Puzzle) {
