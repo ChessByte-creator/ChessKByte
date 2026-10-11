@@ -927,6 +927,7 @@ export function ChessApp() {
 
         let lines = searched.lines;
         let bestUci = searched.bestmove;
+        let shallowBest: string | undefined;
         if (!forced && needsAfterSearch(lines, uci, bestUci) && !(await loadAfter())) return;
         const judge = () =>
           judgePly({
@@ -941,6 +942,7 @@ export function ChessApp() {
             recapture,
             prevOpponentLoss: prevLoss,
             seed: index,
+            shallowBest,
           });
         let result = judge();
 
@@ -952,6 +954,13 @@ export function ChessApp() {
           bestUci = deep.bestmove;
           if (needsAfterSearch(lines, uci, bestUci) && !(await loadAfter())) return;
           result = judge();
+          // Brilhante tem que ser difícil de achar: se um motor raso já escolhe esse lance, é óbvio.
+          if (result.judgment === "brilliant") {
+            const shallow = await engine.search({ fen: beforeFen, depth: 4, movetime: 400, multipv: 1 });
+            if (jobRef.current !== job || shallow.cancelled) return;
+            shallowBest = shallow.bestmove;
+            result = judge();
+          }
         }
 
         moves[index] = result;

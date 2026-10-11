@@ -139,8 +139,14 @@ export type MoveClassInput = {
   gap: number;
   /** Lance ainda é teoria de abertura. */
   book: boolean;
-  /** Entregou material de verdade (confirmado na linha do motor). */
+  /** Sacrifício VOLUNTÁRIO: entregou material e existia alternativa que não perdia material. */
   sacrifice: boolean;
+  /** Lance silencioso: sem captura, xeque ou promoção. */
+  quiet: boolean;
+  /** Um motor raso (profundidade 4) já acha esse lance: não é difícil de ver. */
+  obvious: boolean;
+  /** Quase sem escolha: poucos lances legais, ou em xeque com poucas saídas. */
+  nearlyForced: boolean;
   /** Simples recaptura da peça que acabou de capturar. */
   recapture: boolean;
   /** Quanto o adversário perdeu de win% no lance anterior. */
@@ -153,6 +159,9 @@ export type MoveClassInput = {
 export const GREAT_GAP = 15;
 export const BRILLIANT_MAX_BEFORE = 85;
 export const BRILLIANT_MIN_AFTER = 45;
+/** Brilhante sem sacrifício: todas as alternativas perdem pelo menos isto em chance de vitória. */
+export const BRILLIANT_QUIET_GAP = 30;
+export const BRILLIANT_QUIET_MIN_BEFORE = 15;
 
 /**
  * Categorias por chance de vitória (pontos esperados), não por centipeões.
@@ -161,14 +170,18 @@ export const BRILLIANT_MIN_AFTER = 45;
  * - Ótimo: lance crítico que decide o jogo; a melhor alternativa é bem pior.
  */
 export function classifyMove(input: MoveClassInput): Judgment {
-  const { winLoss, winBefore, winAfter, playedBest, forced, legalCount, gap, book, sacrifice, recapture, prevOpponentLoss, bestIsMate } = input;
+  const { winLoss, winBefore, winAfter, playedBest, forced, legalCount, gap, book, sacrifice, quiet, obvious, nearlyForced, recapture, prevOpponentLoss, bestIsMate } = input;
   if (book) return "book";
 
   const nearBest = playedBest || winLoss < 3;
   const decided = winBefore >= 92 || winBefore <= 5;
 
   if (nearBest && !forced && !recapture) {
-    if (sacrifice && winBefore <= BRILLIANT_MAX_BEFORE && winAfter >= BRILLIANT_MIN_AFTER && winLoss < 3 && !bestIsMate) return "brilliant";
+    // Brilhante: difícil de achar (um motor raso não acha) e não obrigatório, por um de dois caminhos:
+    // 1) sacrifício voluntário; 2) lance silencioso que todas as alternativas deixam muito pior.
+    const hard = !obvious && !nearlyForced && !bestIsMate && winAfter >= BRILLIANT_MIN_AFTER && winBefore <= BRILLIANT_MAX_BEFORE;
+    if (hard && sacrifice && winLoss < 3) return "brilliant";
+    if (hard && quiet && playedBest && gap >= BRILLIANT_QUIET_GAP && winBefore >= BRILLIANT_QUIET_MIN_BEFORE) return "brilliant";
     if (playedBest && legalCount > 2 && !decided && !bestIsMate && gap >= GREAT_GAP) return "great";
   }
 
@@ -185,9 +198,9 @@ export function classifyMove(input: MoveClassInput): Judgment {
 
 const NOTES: Record<Judgment, string[]> = {
   brilliant: [
-    "Sacrifício de verdade, e o motor aprova. Isso é difícil de ver.",
-    "Entregou material com método. Byte tirou o chapéu.",
-    "Lance de quem enxerga além do material. Brilhante.",
+    "Difícil de achar e o motor aprova. Brilhante.",
+    "Não tinha nada de óbvio aqui, e você achou. Byte tirou o chapéu.",
+    "Lance de quem enxerga além do que está na mesa. Brilhante.",
   ],
   great: [
     "Lance crítico: as outras opções pioravam bastante.",

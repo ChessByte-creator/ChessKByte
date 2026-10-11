@@ -68,13 +68,13 @@ export function firstMove(pv: string) {
 }
 
 /**
- * Sacrifício = o jogador fica pelo menos 2 pontos de material atrás num ponto "assentado"
- * da linha do motor (depois da resposta do adversário, sem troca em andamento).
- * O movimento em si nunca reduz o próprio material; é preciso olhar a continuação.
+ * Saldo de material do jogador (dele menos do adversário) em relação ao início da linha, no pior ponto
+ * "assentado": depois da resposta do adversário e sem troca em andamento. O próprio lance nunca reduz
+ * o material de quem joga; é preciso olhar a continuação. Devolve null se a linha for curta demais.
  */
-export function detectSacrifice(beforeFen: string, pv: string, color: "w" | "b", horizon = 8): boolean {
+export function settledMaterialDelta(beforeFen: string, pv: string, color: "w" | "b", horizon = 8): number | null {
   const tokens = pv.trim().split(/\s+/).filter((token) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(token));
-  if (tokens.length < 2) return false;
+  if (tokens.length < 2) return null;
   const chess = new Chess(beforeFen);
   const base = balance(chess, color);
   const captures: boolean[] = [];
@@ -86,12 +86,32 @@ export function detectSacrifice(beforeFen: string, pv: string, color: "w" | "b",
     captures.push(moved.isCapture() || Boolean(moved.promotion));
     diffs.push(balance(chess, color) - base);
   }
+  let worst: number | null = null;
   for (let t = 2; t <= diffs.length; t += 2) {
-    const exchangeOngoing = t < captures.length && captures[t];
-    if (exchangeOngoing) continue;
-    if (diffs[t - 1] <= -2) return true;
+    if (t < captures.length && captures[t]) continue; // troca ainda em andamento
+    worst = worst === null ? diffs[t - 1] : Math.min(worst, diffs[t - 1]);
   }
-  return false;
+  return worst;
+}
+
+/** Perda de material de pelo menos 2 pontos na linha do motor (a linha começa no lance jogado). */
+export function detectSacrifice(beforeFen: string, pv: string, color: "w" | "b", horizon = 8): boolean {
+  const delta = settledMaterialDelta(beforeFen, pv, color, horizon);
+  return delta !== null && delta <= -2;
+}
+
+/**
+ * Sacrifício voluntário: o lance perde material E alguma alternativa do motor mantém pelo menos 2 pontos
+ * a mais. Se todas as alternativas também perdem (ataque descoberto, peça já ameaçada, xeque), a perda
+ * é obrigatória e não conta como sacrifício.
+ */
+export function isVoluntarySacrifice(beforeFen: string, playedPv: string, otherPvs: string[], color: "w" | "b"): boolean {
+  const played = settledMaterialDelta(beforeFen, playedPv, color);
+  if (played === null || played > -2) return false;
+  return otherPvs.some((pv) => {
+    const alt = settledMaterialDelta(beforeFen, pv, color);
+    return alt !== null && alt >= played + 2;
+  });
 }
 
 export type JudgeInput = {
@@ -108,6 +128,8 @@ export type JudgeInput = {
   recapture: boolean;
   prevOpponentLoss: number;
   seed: number;
+  /** Melhor lance de uma busca rasa (profundidade 4), quando já foi consultada. */
+  shallowBest?: string;
 };
 
 const ZERO: WhiteEval = { cp: 0, mate: null };
@@ -148,8 +170,19 @@ export function judgePly(input: JudgeInput): MoveReview {
   const gap = alt ? Math.max(0, winBefore - altWin) : 0;
 
   const pvForPlayed = playedLine?.pv ?? (uci === bestUci ? top?.pv : undefined) ?? "";
-  const sacrifice = !forced && !inBook && pvForPlayed ? detectSacrifice(beforeFen, pvForPlayed, color) : false;
+  const otherPvs = lines.filter((line) => firstMove(line.pv) !== uci).map((line) => line.pv);
+  const sacrifice = !forced && !inBook && pvForPlayed ? isVoluntarySacrifice(beforeFen, pvForPlayed, otherPvs, color) : false;
   const bestIsMate = top?.mate != null && top.mate !== 0 && (turn === color ? top.mate > 0 : top.mate < 0);
+  const nearlyForced = legalCount <= 2 || (before.inCheck() && legalCount <= 3);
+  const trial = new Chess(beforeFen);
+  let quiet = false;
+  try {
+    const moved = trial.move({ from: uci.slice(0, 2) as Square, to: uci.slice(2, 4) as Square, promotion: uci.length > 4 ? (uci[4] as "q" | "r" | "b" | "n") : undefined });
+    quiet = !moved.isCapture() && !moved.promotion && !moved.san.includes("+") && !moved.san.includes("#");
+  } catch {
+    quiet = false;
+  }
+  const obvious = input.shallowBest !== undefined && input.shallowBest === uci;
 
   const judgment = classifyMove({
     winLoss,
@@ -161,6 +194,9 @@ export function judgePly(input: JudgeInput): MoveReview {
     gap,
     book: inBook,
     sacrifice,
+    quiet,
+    obvious,
+    nearlyForced,
     recapture,
     prevOpponentLoss,
     bestIsMate,
