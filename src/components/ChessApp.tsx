@@ -105,6 +105,7 @@ export function ChessApp() {
   const [drawMode, setDrawMode] = useState(false);
   const [drawColor, setDrawColor] = useState<ShapeColor>("green");
   const [premoves, setPremoves] = useState<Premove[]>([]);
+  const [visited, setVisited] = useState({ puzzle: false, repo: false });
   const [premoveOn, setPremoveOn] = useState(true);
   const [searchGen, setSearchGen] = useState(0);
   const [openings, setOpenings] = useState<OpeningsIndex | null>(null);
@@ -204,6 +205,12 @@ export function ChessApp() {
       engineRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (view === "puzzle" || view === "repo") {
+      setVisited((current) => (current[view] ? current : { ...current, [view]: true }));
+    }
+  }, [view]);
 
   useEffect(() => {
     try {
@@ -1076,12 +1083,19 @@ export function ChessApp() {
         ))}
       </div>
 
-      {view === "puzzle" ? (
-        <PuzzleScreen />
-      ) : view === "library" ? (
+      {/* Puzzles e Repositório ficam montados depois da primeira visita (só escondidos), para não perder o arquivo aberto. */}
+      {view === "puzzle" || visited.puzzle ? (
+        <div hidden={view !== "puzzle"}>
+          <PuzzleScreen />
+        </div>
+      ) : null}
+      {view === "repo" || visited.repo ? (
+        <div hidden={view !== "repo"}>
+          <RepositoryScreen openings={openings} onOpen={openLineInAnalysis} />
+        </div>
+      ) : null}
+      {view === "puzzle" || view === "repo" ? null : view === "library" ? (
         <OpeningsScreen index={openings} onOpen={openLineInAnalysis} />
-      ) : view === "repo" ? (
-        <RepositoryScreen openings={openings} onOpen={openLineInAnalysis} />
       ) : (
       <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <section className="flex flex-col gap-3">

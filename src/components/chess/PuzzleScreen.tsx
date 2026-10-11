@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Chess, type Square } from "chess.js";
 import { Board, type BoardArrow } from "@/components/chess/Board";
-import { PuzzleStream, type PuzzleFilter } from "@/lib/importers/puzzle-stream";
+import { PuzzleStream, matchesFilter, type PuzzleFilter } from "@/lib/importers/puzzle-stream";
+import { SHAPE_COLORS, toggleShape, type Shape, type ShapeColor } from "@/lib/shapes";
 import { kingInCheck } from "@/lib/game";
 import {
   BUILTIN_PUZZLES,
@@ -28,6 +29,9 @@ const PROMO_LABEL: Record<Promo, string> = { q: "Dama", r: "Torre", b: "Bispo", 
 /** Puzzles prontos (o atual + a fila) quando se lê o arquivo sob demanda. */
 const LAZY_TARGET = 5;
 const LAZY_MARK = "byte-chess-lazy-v1";
+const MARGIN_KEY = "byte-chess-puzzle-margin-v1";
+/** Margens em torno do rating do jogador (0 = sem limite). */
+const MARGINS = [100, 200, 300, 500, 800, 0] as const;
 
 type LazyState = {
   stream: PuzzleStream;
@@ -60,8 +64,18 @@ export function PuzzleScreen() {
   const [lazyQueue, setLazyQueue] = useState(0);
   const [lazyLines, setLazyLines] = useState(0);
   const [lazyPct, setLazyPct] = useState(0);
-  const [lazyMin, setLazyMin] = useState("800");
-  const [lazyMax, setLazyMax] = useState("1600");
+  const [margin, setMargin] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem(MARGIN_KEY));
+      return (MARGINS as readonly number[]).includes(saved) && localStorage.getItem(MARGIN_KEY) !== null ? saved : 300;
+    } catch {
+      return 300;
+    }
+  });
+  const [shapes, setShapes] = useState<Shape[]>([]);
+  const [drawMode, setDrawMode] = useState(false);
+  const [drawColor, setDrawColor] = useState<ShapeColor>("green");
+  const marginRef = useRef(margin);
   const [lazyRestart, setLazyRestart] = useState(false);
   const lazyRef = useRef<LazyState | null>(null);
   const lazyFileRef = useRef<HTMLInputElement>(null);
@@ -72,6 +86,7 @@ export function PuzzleScreen() {
   const stepRef = useRef(step);
   const hintedRef = useRef(false);
   const themeRef = useRef(theme);
+  marginRef.current = margin;
   profileRef.current = profile;
   puzzleRef.current = puzzle;
   fenRef.current = fen;
@@ -99,6 +114,7 @@ export function PuzzleScreen() {
     setSelected(null);
     setPromo(null);
     setArrows([]);
+    setShapes([]);
     setHintSquare(null);
     setHinted(false);
     hintedRef.current = false;
@@ -112,10 +128,18 @@ export function PuzzleScreen() {
     return pickFromList(BUILTIN_PUZZLES, current.rating, new Set(current.recent), filter);
   }
 
+  /** Faixa de rating = rating atual do jogador ± margem (margem 0 = sem limite). Acompanha o rating a cada puzzle. */
+  function currentFilter(): PuzzleFilter {
+    const rating = profileRef.current.rating;
+    const span = marginRef.current;
+    return span === 0 ? { minRating: 0, maxRating: 9999, theme: themeRef.current } : { minRating: Math.max(0, rating - span), maxRating: rating + span, theme: themeRef.current };
+  }
+
   /** Lê do arquivo só o que falta para manter a fila (uma leitura por vez). */
   function lazyTake(state: LazyState, wanted: number) {
     state.busy = state.busy.then(async () => {
       if (state.abort.signal.aborted || state.stream.done) return;
+      state.filter = currentFilter();
       const exclude = new Set<string>([...profileRef.current.recent, ...state.queue.map((item) => item.id)]);
       if (puzzleRef.current) exclude.add(puzzleRef.current.id);
       const found = await state.stream.take(wanted, state.filter, exclude, state.abort.signal, (lines) => {
@@ -140,6 +164,10 @@ export function PuzzleScreen() {
     const state = lazyRef.current;
     if (!state) return;
     const target = solved ? LAZY_TARGET : LAZY_TARGET - 1;
+    // O rating mudou: puzzles da fila que saíram da faixa são trocados por outros dentro dela.
+    state.filter = currentFilter();
+    state.queue = state.queue.filter((item) => matchesFilter(item, state.filter));
+    setLazyQueue(state.queue.length);
     const missing = target - state.queue.length;
     if (missing > 0) void lazyTake(state, missing).catch(() => setLazyNote("Não consegui ler mais puzzles do arquivo."));
   }
@@ -168,9 +196,7 @@ export function PuzzleScreen() {
         resume = 0;
       }
       const stream = await PuzzleStream.open(file, resume);
-      const min = Math.max(0, Number(lazyMin) || 0);
-      const max = Math.max(min, Number(lazyMax) || 4000);
-      const state: LazyState = { stream, queue: [], filter: { minRating: min, maxRating: max, theme: themeRef.current }, busy: Promise.resolve(), abort: new AbortController() };
+      const state: LazyState = { stream, queue: [], filter: currentFilter(), busy: Promise.resolve(), abort: new AbortController() };
       lazyRef.current = state;
       setLazyName(file.name);
       setLazyNote(resume > 0 ? `Retomando da linha ${resume.toLocaleString("pt-BR")}…` : "Procurando puzzles nos filtros…");
@@ -194,9 +220,7 @@ export function PuzzleScreen() {
   function applyLazyFilters() {
     const state = lazyRef.current;
     if (!state) return;
-    const min = Math.max(0, Number(lazyMin) || 0);
-    const max = Math.max(min, Number(lazyMax) || 4000);
-    state.filter = { minRating: min, maxRating: max, theme: themeRef.current };
+    state.filter = currentFilter();
     state.queue = [];
     setLazyQueue(0);
     setLazyNote("Filtros aplicados. Procurando…");
@@ -458,6 +482,11 @@ export function PuzzleScreen() {
             lastMove={lastMove}
             checkSquare={kingInCheck(fen)}
             arrows={arrows}
+            shapes={shapes}
+            onShape={(shape) => setShapes((current) => toggleShape(current, shape))}
+            onClearShapes={() => setShapes([])}
+            drawMode={drawMode}
+            drawColor={drawColor}
             interactive={interactive}
             player={solver}
             onSquare={selectSquare}
@@ -511,6 +540,34 @@ export function PuzzleScreen() {
             Próximo
           </button>
         </div>
+        <div className="mx-auto flex w-full max-w-xl flex-wrap items-center gap-2">
+          <button type="button" className={btn(drawMode)} aria-pressed={drawMode} onClick={() => setDrawMode((value) => !value)}>
+            Desenhar
+          </button>
+          {drawMode ? (
+            <div className="flex items-center gap-1" role="group" aria-label="Cor do desenho">
+              {(Object.keys(SHAPE_COLORS) as ShapeColor[]).map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  aria-label={SHAPE_COLORS[color].label}
+                  aria-pressed={drawColor === color}
+                  onClick={() => setDrawColor(color)}
+                  className={`size-9 rounded-full border-2 ${drawColor === color ? "border-ink" : "border-transparent"}`}
+                  style={{ backgroundColor: SHAPE_COLORS[color].hex }}
+                />
+              ))}
+            </div>
+          ) : null}
+          {shapes.length > 0 ? (
+            <button type="button" className={btn()} onClick={() => setShapes([])}>
+              Limpar desenhos
+            </button>
+          ) : null}
+        </div>
+        <p className="mx-auto w-full max-w-xl text-xs text-muted">
+          Botão direito marca uma casa; arrastar com o direito desenha uma seta (Shift vermelho, Ctrl azul, Alt amarelo). No celular, ligue “Desenhar”. Os desenhos somem no próximo puzzle.
+        </p>
       </section>
 
       <aside className="flex flex-col gap-3">
@@ -567,7 +624,12 @@ export function PuzzleScreen() {
           <select
             id="puzzle-theme"
             value={theme}
-            onChange={(event) => setTheme(event.target.value as ThemeFilter)}
+            onChange={(event) => {
+              const next = event.target.value as ThemeFilter;
+              themeRef.current = next;
+              setTheme(next);
+              applyLazyFilters();
+            }}
             className="min-h-11 w-full rounded-lg border border-line bg-cream px-2 text-sm"
           >
             {THEME_FILTERS.map((item) => (
@@ -576,20 +638,36 @@ export function PuzzleScreen() {
               </option>
             ))}
           </select>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <div>
-              <label className="mb-1 block text-sm text-muted" htmlFor="lazy-min">
-                Rating mínimo
-              </label>
-              <input id="lazy-min" inputMode="numeric" value={lazyMin} onChange={(event) => setLazyMin(event.target.value.replace(/\D/g, "").slice(0, 4))} className="min-h-11 w-full rounded-lg border border-line bg-cream px-2 text-sm" />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-muted" htmlFor="lazy-max">
-                Rating máximo
-              </label>
-              <input id="lazy-max" inputMode="numeric" value={lazyMax} onChange={(event) => setLazyMax(event.target.value.replace(/\D/g, "").slice(0, 4))} className="min-h-11 w-full rounded-lg border border-line bg-cream px-2 text-sm" />
-            </div>
-          </div>
+          <label className="mt-3 mb-1 block text-sm text-muted" htmlFor="puzzle-margin">
+            Dificuldade: margem em torno do seu rating
+          </label>
+          <select
+            id="puzzle-margin"
+            value={margin}
+            onChange={(event) => {
+              const next = Number(event.target.value);
+              marginRef.current = next;
+              setMargin(next);
+              try {
+                localStorage.setItem(MARGIN_KEY, String(next));
+              } catch {
+                /* ignore quota */
+              }
+              applyLazyFilters();
+            }}
+            className="min-h-11 w-full rounded-lg border border-line bg-cream px-2 text-sm"
+          >
+            {MARGINS.map((value) => (
+              <option key={value} value={value}>
+                {value === 0 ? "Sem limite" : `± ${value}`}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-muted">
+            {margin === 0
+              ? "Qualquer rating."
+              : `Faixa agora: ${Math.max(0, profile.rating - margin)} a ${profile.rating + margin}. Acompanha o seu rating conforme você resolve.`}
+          </p>
           <label className="mt-2 flex min-h-11 items-center gap-2 text-sm text-ink">
             <input type="checkbox" checked={lazyRestart} onChange={(event) => setLazyRestart(event.target.checked)} className="size-5 accent-walnut" />
             Recomeçar do início (senão retoma de onde parou)
@@ -608,9 +686,6 @@ export function PuzzleScreen() {
           <div className="mt-2 grid grid-cols-2 gap-2">
             <button type="button" className={btn(true)} onClick={() => lazyFileRef.current?.click()}>
               {lazyName ? "Trocar arquivo" : "Abrir arquivo"}
-            </button>
-            <button type="button" className={btn()} onClick={applyLazyFilters} disabled={!lazyName}>
-              Aplicar filtros
             </button>
             <button type="button" className={btn()} onClick={() => void goNext()} disabled={phase === "setup" || phase === "reply"}>
               Sortear
