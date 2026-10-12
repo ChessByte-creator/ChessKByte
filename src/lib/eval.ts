@@ -175,8 +175,10 @@ export type MoveClassInput = {
 export const GREAT_GAP = 15;
 /** Quanto de chance de vitória o lance "melhor do motor" pode perder na checagem posterior e ainda ser "Melhor". */
 export const BEST_TOLERANCE = 2;
-export const BRILLIANT_MAX_BEFORE = 85;
-export const BRILLIANT_MIN_AFTER = 45;
+export const BRILLIANT_MAX_BEFORE = 80;
+export const BRILLIANT_MIN_AFTER = 50;
+/** Brilhante por sacrifício: as alternativas têm de ser claramente piores. */
+export const BRILLIANT_SAC_GAP = 10;
 /** Brilhante sem sacrifício: todas as alternativas perdem pelo menos isto em chance de vitória. */
 export const BRILLIANT_QUIET_GAP = 30;
 export const BRILLIANT_QUIET_MIN_BEFORE = 15;
@@ -184,7 +186,7 @@ export const BRILLIANT_QUIET_MIN_BEFORE = 15;
 /**
  * Categorias por chance de vitória (pontos esperados), não por centipeões.
  * - Livro: lance de teoria.
- * - Brilhante: sacrifício real, lance quase ótimo, posição que não estava ganha nem fica perdida.
+ * - Brilhante: sacrifício voluntário de peça (nunca só peão), quase ótimo, e as outras linhas pioram de verdade.
  * - Ótimo: lance crítico que decide o jogo; a melhor alternativa é bem pior.
  */
 export function classifyMove(input: MoveClassInput): Judgment {
@@ -196,9 +198,9 @@ export function classifyMove(input: MoveClassInput): Judgment {
 
   if (nearBest && !forced && !recapture) {
     // Brilhante: difícil de achar (um motor raso não acha) e não obrigatório, por um de dois caminhos:
-    // 1) sacrifício voluntário; 2) lance silencioso que todas as alternativas deixam muito pior.
+    // 1) sacrifício voluntário de peça, com alternativas piores; 2) lance silencioso decisivo.
     const hard = !obvious && !nearlyForced && !bestIsMate && winAfter >= BRILLIANT_MIN_AFTER && winBefore <= BRILLIANT_MAX_BEFORE;
-    if (hard && sacrifice && winLoss < 3) return "brilliant";
+    if (hard && sacrifice && winLoss < 2.5 && gap >= BRILLIANT_SAC_GAP) return "brilliant";
     if (hard && quiet && playedBest && gap >= BRILLIANT_QUIET_GAP && winBefore >= BRILLIANT_QUIET_MIN_BEFORE) return "brilliant";
     if (playedBest && winLoss < BEST_TOLERANCE && legalCount > 2 && !decided && !bestIsMate && gap >= GREAT_GAP) return "great";
   }

@@ -94,23 +94,46 @@ export function settledMaterialDelta(beforeFen: string, pv: string, color: "w" |
   return worst;
 }
 
-/** Perda de material de pelo menos 2 pontos na linha do motor (a linha começa no lance jogado). */
+/** Peão não conta. Só cavalo, bispo, torre ou dama. */
+export const SACRIFICE_MIN_PIECE = 3;
+/** Perda líquida mínima, já descontada a compensação que a linha recupera. */
+export const SACRIFICE_MIN_NET = 2;
+
+/** Maior peça nossa que o adversário captura na linha. 0 se ele não captura nada. */
+export function maxOwnPieceCaptured(beforeFen: string, pv: string, color: "w" | "b", horizon = 8): number {
+  const tokens = pv.trim().split(/\s+/).filter((token) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(token));
+  if (tokens.length < 2) return 0;
+  const chess = new Chess(beforeFen);
+  let max = 0;
+  const limit = Math.min(tokens.length, horizon);
+  for (let i = 0; i < limit; i += 1) {
+    const moved = playToken(chess, tokens[i]);
+    if (!moved) break;
+    if (i % 2 === 1 && moved.captured) max = Math.max(max, PIECE_VALUE[moved.captured] ?? 0);
+  }
+  return max;
+}
+
+/** Perda de uma peça (não peão) de pelo menos 2 pontos líquidos na linha do motor. */
 export function detectSacrifice(beforeFen: string, pv: string, color: "w" | "b", horizon = 8): boolean {
+  if (maxOwnPieceCaptured(beforeFen, pv, color, horizon) < SACRIFICE_MIN_PIECE) return false;
   const delta = settledMaterialDelta(beforeFen, pv, color, horizon);
-  return delta !== null && delta <= -2;
+  return delta !== null && delta <= -SACRIFICE_MIN_NET;
 }
 
 /**
- * Sacrifício voluntário: o lance perde material E alguma alternativa do motor mantém pelo menos 2 pontos
- * a mais. Se todas as alternativas também perdem (ataque descoberto, peça já ameaçada, xeque), a perda
- * é obrigatória e não conta como sacrifício.
+ * Sacrifício voluntário de peça: a linha entrega cavalo, bispo, torre ou dama,
+ * fica pelo menos 2 pontos pior no material assentado, e alguma alternativa
+ * do motor evita essa perda. Peão — mesmo dois — não conta. Se toda alternativa
+ * também perde a peça, a entrega é forçada e não é sacrifício.
  */
 export function isVoluntarySacrifice(beforeFen: string, playedPv: string, otherPvs: string[], color: "w" | "b"): boolean {
+  if (maxOwnPieceCaptured(beforeFen, playedPv, color) < SACRIFICE_MIN_PIECE) return false;
   const played = settledMaterialDelta(beforeFen, playedPv, color);
-  if (played === null || played > -2) return false;
+  if (played === null || played > -SACRIFICE_MIN_NET) return false;
   return otherPvs.some((pv) => {
     const alt = settledMaterialDelta(beforeFen, pv, color);
-    return alt !== null && alt >= played + 2;
+    return alt !== null && alt >= played + SACRIFICE_MIN_NET;
   });
 }
 
@@ -174,13 +197,15 @@ export function judgePly(input: JudgeInput): MoveReview {
   const pvForPlayed = playedLine?.pv ?? (uci === bestUci ? top?.pv : undefined) ?? "";
   const otherPvs = lines.filter((line) => firstMove(line.pv) !== uci).map((line) => line.pv);
   const sacrifice = !forced && !inBook && pvForPlayed ? isVoluntarySacrifice(beforeFen, pvForPlayed, otherPvs, color) : false;
+  const materialDelta = pvForPlayed ? settledMaterialDelta(beforeFen, pvForPlayed, color) : null;
+  const givesMaterial = materialDelta !== null && materialDelta < 0;
   const bestIsMate = top?.mate != null && top.mate !== 0 && (turn === color ? top.mate > 0 : top.mate < 0);
   const nearlyForced = legalCount <= 2 || (before.inCheck() && legalCount <= 3);
   const trial = new Chess(beforeFen);
   let quiet = false;
   try {
     const moved = trial.move({ from: uci.slice(0, 2) as Square, to: uci.slice(2, 4) as Square, promotion: uci.length > 4 ? (uci[4] as "q" | "r" | "b" | "n") : undefined });
-    quiet = !moved.isCapture() && !moved.promotion && !moved.san.includes("+") && !moved.san.includes("#");
+    quiet = !givesMaterial && !moved.isCapture() && !moved.promotion && !moved.san.includes("+") && !moved.san.includes("#");
   } catch {
     quiet = false;
   }
