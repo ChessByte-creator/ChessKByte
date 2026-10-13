@@ -4,11 +4,14 @@ import { importGameFile } from "@/lib/importers/game-import";
 import { openGameSource, type GameSource } from "@/lib/importers/game-source";
 import { clearRepoSession, repoSession } from "@/lib/repo-session";
 import { pliesFromSan, type Ply } from "@/lib/game";
-import { KIND_LABEL, openingNamePt, type OpeningKind, type OpeningsIndex } from "@/lib/openings";
+import { infoFromRecord, type GameInfo } from "@/lib/game-info";
+import { ECO_VOLUMES, KIND_LABEL, openingNamePt, type OpeningKind, type OpeningsIndex } from "@/lib/openings";
 
 type Props = {
   openings: OpeningsIndex | null;
-  onOpen: (plies: Ply[], at?: "start" | "end") => void;
+  onOpen: (plies: Ply[], at?: "start" | "end", info?: GameInfo | null) => void;
+  /** Verdadeiro enquanto a aba Repositório está visível (a tela fica montada, só escondida). */
+  active?: boolean;
 };
 
 type Mode = "file" | "local";
@@ -16,7 +19,24 @@ type Mode = "file" | "local";
 const PAGE_SIZES = [10, 25, 50, 100] as const;
 const RESULT_LABEL: Record<GameResult, string> = { "1-0": "1–0", "0-1": "0–1", "1/2-1/2": "½–½", "*": "*" };
 
-export function RepositoryScreen({ openings, onOpen }: Props) {
+const KIND_CHIPS: Array<{ id: OpeningKind | "gambit" | "all"; label: string }> = [
+  { id: "all", label: "Todos" },
+  { id: "opening", label: "Aberturas" },
+  { id: "defense", label: "Defesas" },
+  { id: "gambit", label: "Gambitos" },
+];
+const RESULT_CHIPS: Array<{ id: GameResult | "all"; label: string }> = [
+  { id: "all", label: "Qualquer" },
+  { id: "1-0", label: "Brancas" },
+  { id: "1/2-1/2", label: "Empate" },
+  { id: "0-1", label: "Pretas" },
+];
+const ELO_CHIPS = [0, 1500, 1800, 2000, 2200, 2400, 2600];
+/** Atalhos de abertura: preenchem o campo de busca (que entende nome em português, inglês, ECO ou lances). */
+const OPENING_SHORTCUTS = ["Siciliana", "Italiana", "Ruy Lopez", "Francesa", "Caro-Kann", "Gambito da Dama", "Índia do Rei", "Inglesa", "Escandinava", "Londres", "Gambito do Rei", "Nimzo-Indiana"];
+const ECO_SHORT: Record<string, string> = { A: "A · Flanco", B: "B · Semiaberta", C: "C · Aberta", D: "D · Fechada", E: "E · Indianas" };
+
+export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
   const [mode, setMode] = useState<Mode>(repoSession.mode);
   const [pageSize, setPageSize] = useState<number>(repoSession.pageSize);
 
@@ -37,6 +57,11 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
   const [moreAhead, setMoreAhead] = useState(repoSession.moreAhead);
   const [busy, setBusy] = useState(false);
   const [scan, setScan] = useState({ scanned: 0, pct: 0 });
+  const [live, setLive] = useState<GameRecord[]>([]);
+  const [filtersOpen, setFiltersOpen] = useState(repoSession.pages.length === 0);
+  const [opened, setOpened] = useState<GameRecord | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const firstPage = useRef(true);
 
   // arquivo aberto sob demanda
   const [fileInfo, setFileInfo] = useState<{ name: string; format: string } | null>(repoSession.fileInfo);
@@ -109,6 +134,24 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
     };
   }, [refreshMeta]);
 
+  // Ao trocar de página, volta ao topo da lista (senão o jogador fica no fim da página nova, sem ver nada).
+  useEffect(() => {
+    if (firstPage.current) {
+      firstPage.current = false;
+      return;
+    }
+    const top = listRef.current?.getBoundingClientRect().top ?? 0;
+    if (top < 0) listRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [pageIdx]);
+
+  // Ao voltar para esta aba, mostra de novo a partida que estava aberta.
+  useEffect(() => {
+    if (!active || !opened) return;
+    const index = pages[pageIdx]?.indexOf(opened) ?? -1;
+    if (index < 0) return;
+    listRef.current?.querySelector<HTMLElement>(`[data-row="${index}"]`)?.scrollIntoView({ block: "center" });
+  }, [active, opened, pages, pageIdx]);
+
   function resetResults() {
     abortRef.current?.abort();
     pagesRef.current = [];
@@ -131,10 +174,17 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
     abortRef.current = abort;
     setBusy(true);
     setNote("");
+    setLive([...bufferRef.current]);
     try {
       const need = size + 1 - bufferRef.current.length;
       if (need > 0 && !stream.done) {
-        const found = await stream.take(need, appliedRef.current, abort.signal, (scanned, percent) => setScan({ scanned, pct: percent }));
+        const found = await stream.take(
+          need,
+          appliedRef.current,
+          abort.signal,
+          (scanned, percent) => setScan({ scanned, pct: percent }),
+          (rows) => setLive((current) => [...current, ...rows]),
+        );
         bufferRef.current.push(...found);
       }
       if (abort.signal.aborted) {
@@ -155,6 +205,7 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
       setNote(error instanceof Error && error.message ? error.message : "Não consegui ler o arquivo.");
     } finally {
       setBusy(false);
+      setLive([]);
     }
   }
 
@@ -181,6 +232,7 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
 
   /** Aplica os filtros dos campos e volta para a página 1 (no arquivo, recomeça a leitura do início). */
   function search(size = pageSize, nextMode = mode) {
+    setFiltersOpen(false);
     resetResults();
     appliedRef.current = { ...currentFilters(), family: nextMode === "local" ? family || undefined : undefined, source: nextMode === "local" ? source || undefined : undefined };
     if (nextMode === "file") {
@@ -254,7 +306,8 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
       try {
         const plies = await source.loadPlies(game);
         if (plies && plies.length > 1) {
-          onOpen(plies, "start");
+          setOpened(game);
+          onOpen(plies, "start", infoFromRecord(game));
           return;
         }
       } catch {
@@ -263,7 +316,8 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
       setNote("Não consegui decodificar os lances dessa partida.");
       return;
     }
-    onOpen(pliesFromSan(game.moves), "start");
+    setOpened(game);
+    onOpen(pliesFromSan(game.moves), "start", infoFromRecord(game));
   }
 
   async function importFile(file: File) {
@@ -301,27 +355,60 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
     }
   }
 
-  const rows = pages[pageIdx] ?? [];
+  const showingLive = busy && !pages[pageIdx];
+  const rows = pages[pageIdx] ?? (showingLive ? live.slice(0, pageSize) : []);
   const hasNext = pageIdx < pages.length - 1 || moreAhead;
 
+  const applied = appliedRef.current;
+  const summary = [
+    applied.player ? `Jogador: ${applied.player}` : "",
+    applied.text ? applied.text : "",
+    applied.kind && applied.kind !== "all" ? KIND_CHIPS.find((chip) => chip.id === applied.kind)?.label ?? "" : "",
+    applied.result && applied.result !== "all" ? RESULT_CHIPS.find((chip) => chip.id === applied.result)?.label ?? "" : "",
+    applied.minElo ? `${applied.minElo}+` : "",
+    applied.yearFrom || applied.yearTo ? `${applied.yearFrom ?? ""}–${applied.yearTo ?? ""}` : "",
+  ].filter(Boolean);
+
+  function clearFilters() {
+    setPlayer("");
+    setText("");
+    setKind("all");
+    setResult("all");
+    setFamily("");
+    setElo(0);
+    setYearFrom("");
+    setYearTo("");
+    setSource("");
+  }
+
   return (
-    <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
-      <section className="rounded-3xl border border-line bg-paper p-4">
+    <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_22rem] lg:gap-5">
+      <section className="order-2 min-w-0 rounded-3xl border border-line bg-paper p-3 sm:p-4 lg:order-1">
         <h2 className="text-sm font-semibold text-ink">Buscar partidas</h2>
         <p className="mt-1 text-sm text-muted">
           {mode === "file"
             ? fileInfo
-              ? `Lendo ${fileInfo.name} sob demanda: ${pageSize} partidas por página, e mais ${pageSize} a cada página nova.`
-              : "Abra um arquivo de partidas ao lado. Nada é importado: o app lê só o que a página pede."
+              ? `Lendo ${fileInfo.name} sob demanda.`
+              : "Abra um arquivo de partidas. Nada é importado: o app lê só o que a página pede."
             : total == null
               ? "Abrindo o repositório local…"
               : total === 0
-                ? "O repositório local está vazio. Importe um arquivo ao lado."
+                ? "O repositório local está vazio. Importe um arquivo."
                 : `${total.toLocaleString("pt-BR")} partidas guardadas neste aparelho.`}
         </p>
 
+        {/* Celular: filtros recolhidos depois da busca, para a lista ficar no topo. */}
+        {!filtersOpen ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2 lg:hidden">
+            {summary.length === 0 ? <span className="text-sm text-muted">Sem filtros</span> : summary.map((item) => <span key={item} className="rounded-full bg-soft px-3 py-1 text-xs text-ink">{item}</span>)}
+            <button type="button" className="ml-auto min-h-11 rounded-lg border border-line bg-paper px-3 text-sm text-ink" onClick={() => setFiltersOpen(true)}>
+              Editar filtros
+            </button>
+          </div>
+        ) : null}
+
         <form
-          className="mt-3"
+          className={`mt-3 ${filtersOpen ? "block" : "hidden lg:block"}`}
           onSubmit={(event) => {
             event.preventDefault();
             search();
@@ -329,37 +416,50 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
         >
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Jogador" id="repo-player">
-              <input id="repo-player" value={player} onChange={(event) => setPlayer(event.target.value)} className={input()} placeholder="nome ou parte dele" />
+              <input id="repo-player" value={player} onChange={(event) => setPlayer(event.target.value)} className={input()} placeholder="começo do nome (ex.: Magnus)" enterKeyHint="search" />
             </Field>
             <Field label="Abertura, ECO ou evento" id="repo-text">
-              <input id="repo-text" value={text} onChange={(event) => setText(event.target.value)} className={input()} placeholder="najdorf, B90, torneio…" />
+              <input id="repo-text" value={text} onChange={(event) => setText(event.target.value)} className={input()} placeholder="najdorf, B90, torneio…" enterKeyHint="search" />
             </Field>
-            <Field label="Tipo de abertura" id="repo-kind">
-              <select id="repo-kind" value={kind} onChange={(event) => setKind(event.target.value as typeof kind)} className={input()}>
-                <option value="all">Todos</option>
-                <option value="opening">Aberturas</option>
-                <option value="defense">Defesas</option>
-                <option value="gambit">Gambitos</option>
-              </select>
-            </Field>
-            <Field label="Resultado" id="repo-result">
-              <select id="repo-result" value={result} onChange={(event) => setResult(event.target.value as typeof result)} className={input()}>
-                <option value="all">Qualquer</option>
-                <option value="1-0">Brancas venceram</option>
-                <option value="0-1">Pretas venceram</option>
-                <option value="1/2-1/2">Empate</option>
-              </select>
-            </Field>
-            <Field label="Rating mínimo (o mais forte)" id="repo-elo">
-              <select id="repo-elo" value={elo} onChange={(event) => setElo(Number(event.target.value))} className={input()}>
-                <option value={0}>Qualquer</option>
-                {[1200, 1500, 1800, 2000, 2200, 2400, 2600].map((value) => (
-                  <option key={value} value={value}>
-                    {value}+
-                  </option>
-                ))}
-              </select>
-            </Field>
+          </div>
+
+          <ChipRow label="Abertura rápida">
+            {OPENING_SHORTCUTS.map((name) => (
+              <button key={name} type="button" aria-pressed={text === name} className={chip(text === name)} onClick={() => setText(text === name ? "" : name)}>
+                {name}
+              </button>
+            ))}
+          </ChipRow>
+          <ChipRow label="Grupo ECO">
+            {ECO_VOLUMES.map((volume) => (
+              <button key={volume.id} type="button" aria-pressed={text.toUpperCase() === volume.id} className={chip(text.toUpperCase() === volume.id)} onClick={() => setText(text.toUpperCase() === volume.id ? "" : volume.id)}>
+                {ECO_SHORT[volume.id] ?? volume.id}
+              </button>
+            ))}
+          </ChipRow>
+          <ChipRow label="Tipo">
+            {KIND_CHIPS.map((item) => (
+              <button key={item.id} type="button" aria-pressed={kind === item.id} className={chip(kind === item.id)} onClick={() => setKind(item.id)}>
+                {item.label}
+              </button>
+            ))}
+          </ChipRow>
+          <ChipRow label="Quem venceu">
+            {RESULT_CHIPS.map((item) => (
+              <button key={item.id} type="button" aria-pressed={result === item.id} className={chip(result === item.id)} onClick={() => setResult(item.id)}>
+                {item.label}
+              </button>
+            ))}
+          </ChipRow>
+          <ChipRow label="Rating mínimo (o mais forte)">
+            {ELO_CHIPS.map((value) => (
+              <button key={value} type="button" aria-pressed={elo === value} className={chip(elo === value)} onClick={() => setElo(value)}>
+                {value === 0 ? "Qualquer" : `${value}+`}
+              </button>
+            ))}
+          </ChipRow>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <div className="grid grid-cols-2 gap-2">
               <Field label="Ano de" id="repo-from">
                 <input id="repo-from" inputMode="numeric" value={yearFrom} onChange={(event) => setYearFrom(event.target.value.replace(/\D/g, "").slice(0, 4))} className={input()} />
@@ -401,92 +501,101 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
           </div>
 
           {mode === "local" && families.length > 0 ? (
-            <div className="mt-3">
-              <p className="mb-1 text-sm text-muted">Famílias mais comuns</p>
-              <div className="flex flex-wrap gap-2">
-                {families.slice(0, 16).map((item) => (
-                  <button key={item.family} type="button" aria-pressed={family === item.family} className={chip(family === item.family)} onClick={() => setFamily(family === item.family ? "" : item.family)}>
-                    {openingNamePt(item.family)} · {item.games.toLocaleString("pt-BR")}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <ChipRow label="Famílias mais comuns">
+              {families.slice(0, 16).map((item) => (
+                <button key={item.family} type="button" aria-pressed={family === item.family} className={chip(family === item.family)} onClick={() => setFamily(family === item.family ? "" : item.family)}>
+                  {openingNamePt(item.family)} · {item.games.toLocaleString("pt-BR")}
+                </button>
+              ))}
+            </ChipRow>
           ) : null}
 
           <div className="mt-3 grid grid-cols-2 gap-2">
             <button type="submit" className={btn(true)} disabled={busy}>
               Buscar
             </button>
-            {busy ? (
-              <button type="button" className={btn()} onClick={() => abortRef.current?.abort()}>
-                Parar
-              </button>
-            ) : (
-              <button
-                type="button"
-                className={btn()}
-                onClick={() => {
-                  setPlayer("");
-                  setText("");
-                  setKind("all");
-                  setResult("all");
-                  setFamily("");
-                  setElo(0);
-                  setYearFrom("");
-                  setYearTo("");
-                  setSource("");
-                }}
-              >
-                Limpar filtros
-              </button>
-            )}
+            <button type="button" className={btn()} onClick={clearFilters} disabled={busy}>
+              Limpar filtros
+            </button>
           </div>
         </form>
 
-        {busy && mode === "file" ? (
-          <p className="mt-3 text-sm text-muted">
-            Procurando… {scan.scanned.toLocaleString("pt-BR")} partidas lidas ({Math.round(scan.pct)}% do arquivo)
-          </p>
+        {busy ? (
+          <div className="mt-3 rounded-lg bg-cream px-3 py-2 text-sm text-ink" role="status">
+            <div className="flex items-center justify-between gap-3">
+              <span>
+                {mode === "file"
+                  ? `Procurando… ${scan.scanned.toLocaleString("pt-BR")} partidas lidas (${Math.round(scan.pct)}%) · ${live.length} achadas`
+                  : "Buscando…"}
+              </span>
+              <button type="button" className="min-h-11 shrink-0 rounded-lg border border-line bg-paper px-3 text-sm" onClick={() => abortRef.current?.abort()}>
+                Parar
+              </button>
+            </div>
+            {mode === "file" ? (
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-soft">
+                <div className="h-full bg-walnut transition-[width] duration-300" style={{ width: `${Math.max(2, scan.pct)}%` }} />
+              </div>
+            ) : null}
+          </div>
         ) : null}
-        {busy && mode === "local" ? <p className="mt-3 text-sm text-muted">Buscando…</p> : null}
         {note ? <p className="mt-3 text-sm text-ink">{note}</p> : null}
 
-        <ul className="mt-4 flex flex-col gap-2">
-          {rows.map((game, index) => (
-            <li key={`${pageIdx}-${index}`}>
-              <button type="button" onClick={() => void openGame(game)} className="w-full rounded-lg bg-cream px-3 py-2 text-left text-sm hover:bg-soft">
-                <span className="flex items-center justify-between gap-3">
-                  <span className="min-w-0 truncate text-ink">
-                    {game.white}
-                    {game.whiteElo ? <span className="text-muted"> ({game.whiteElo})</span> : null} <span className="text-muted">×</span> {game.black}
-                    {game.blackElo ? <span className="text-muted"> ({game.blackElo})</span> : null}
+        <ul ref={listRef} className="mt-3 flex min-h-[55vh] flex-col gap-2 scroll-mt-2" aria-busy={busy}>
+          {rows.map((game, index) => {
+            const isOpened = opened === game;
+            return (
+              <li key={`${pageIdx}-${index}`} data-row={index}>
+                <button
+                  type="button"
+                  onClick={() => void openGame(game)}
+                  className={`min-h-14 w-full rounded-lg px-3 py-2 text-left text-sm ${isOpened ? "bg-soft ring-2 ring-walnut" : "bg-cream hover:bg-soft"} ${busy && !showingLive ? "opacity-60" : ""}`}
+                >
+                  <span className="flex items-start justify-between gap-3">
+                    <span className="min-w-0 text-ink">
+                      <span className="block truncate">
+                        {game.white}
+                        {game.whiteElo ? <span className="text-muted"> ({game.whiteElo})</span> : null}
+                      </span>
+                      <span className="block truncate">
+                        <span className="text-muted">× </span>
+                        {game.black}
+                        {game.blackElo ? <span className="text-muted"> ({game.blackElo})</span> : null}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-right">
+                      <span className="block font-mono text-xs text-ink">{RESULT_LABEL[game.result]}</span>
+                      {isOpened ? <span className="block text-xs text-walnut">aberta</span> : null}
+                    </span>
                   </span>
-                  <span className="shrink-0 font-mono text-xs text-ink">{RESULT_LABEL[game.result]}</span>
-                </span>
-                <span className="mt-1 block truncate text-xs text-muted">
-                  {game.eco ? `${game.eco} · ` : ""}
-                  {game.opening ? openingNamePt(game.opening) : "Abertura não identificada"} · {KIND_LABEL[game.kind]} · {Math.ceil(game.plies / 2)} lances
-                  {game.year ? ` · ${game.year}` : ""}
-                </span>
-              </button>
-            </li>
-          ))}
+                  <span className="mt-1 block truncate text-xs text-muted">
+                    {game.eco ? `${game.eco} · ` : ""}
+                    {game.opening ? openingNamePt(game.opening) : "Abertura não identificada"} · {KIND_LABEL[game.kind]} · {Math.ceil(game.plies / 2)} lances
+                    {game.year ? ` · ${game.year}` : ""}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
 
         {pages.length > 0 ? (
-          <nav className="mt-4 flex items-center justify-between gap-2" aria-label="Páginas">
-            <button type="button" className={btn()} onClick={goPrev} disabled={busy || pageIdx === 0}>
-              Anterior
+          <nav
+            className="sticky bottom-2 z-10 mt-3 flex items-center justify-between gap-2 rounded-2xl border border-line bg-paper/95 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] shadow-lg backdrop-blur"
+            aria-label="Páginas"
+          >
+            <button type="button" className={`${btn()} flex-1`} onClick={goPrev} disabled={busy || pageIdx === 0}>
+              ← Anterior
             </button>
-            <span className="text-sm text-muted">Página {pageIdx + 1}</span>
-            <button type="button" className={btn()} onClick={goNext} disabled={busy || !hasNext}>
-              Próxima
+            <span className="min-w-16 text-center text-sm text-muted">Pág. {pageIdx + 1}</span>
+            <button type="button" className={`${btn(true)} flex-1`} onClick={goNext} disabled={busy || !hasNext}>
+              Próxima →
             </button>
           </nav>
         ) : null}
       </section>
 
-      <aside className="flex flex-col gap-3">
+      <aside className="order-1 flex flex-col gap-3 lg:order-2">
         <section className="rounded-3xl border border-line bg-paper p-4">
           <h2 className="mb-3 text-sm font-semibold text-ink">Fonte das partidas</h2>
           <div className="grid grid-cols-2 gap-2" role="group" aria-label="Fonte">
@@ -525,9 +634,10 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
                   {fileInfo.name} · {streamRef.current?.scanned.toLocaleString("pt-BR") ?? 0} partidas lidas até agora
                 </p>
               ) : null}
-              <p className="mt-3 text-sm text-muted">
-                Aceita bancos do En Croissant (.db3, sem limite de tamanho: só as páginas pedidas são lidas), PGN em .pgn, .pgn.zst ou .pgn.gz (as bases mensais da Lichess) e bancos SQLite (.db) com coluna pgn, ou white e moves. Você pode escolher o .db3 e o .ecsi juntos; o .ecsi (busca por posição) ainda não é usado. Cada busca recomeça do início; “Próxima” continua de onde parou.
-              </p>
+              <details className="mt-3 text-sm text-muted">
+                <summary className="min-h-11 cursor-pointer py-2">Formatos aceitos</summary>
+                Aceita bancos do En Croissant (.db3, sem limite de tamanho: só as páginas pedidas são lidas), PGN em .pgn, .pgn.zst ou .pgn.gz (as bases mensais da Lichess) e bancos SQLite (.db) com coluna pgn, ou white e moves. Você pode escolher o .db3 e o .ecsi juntos; o .ecsi (busca por posição) ainda não é usado. Cada busca recomeça do início; “Próxima” continua de onde parou. Para buscar por jogador sem varrer o arquivo todo, crie os índices no En Croissant (menu do banco).
+              </details>
             </>
           ) : (
             <>
@@ -649,12 +759,21 @@ function Field({ label, id, children }: { label: string; id: string; children: R
   );
 }
 
+function ChipRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="mt-3">
+      <p className="mb-1 text-sm text-muted">{label}</p>
+      <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 sm:flex-wrap sm:overflow-visible">{children}</div>
+    </div>
+  );
+}
+
 function input() {
   return "min-h-11 w-full rounded-lg border border-line bg-cream px-2 text-sm";
 }
 
 function chip(active: boolean) {
-  return `min-h-9 rounded-full px-3 text-xs ${active ? "bg-walnut text-cream" : "border border-line bg-paper text-ink"}`;
+  return `min-h-11 shrink-0 whitespace-nowrap rounded-full px-4 text-sm ${active ? "bg-walnut text-cream" : "border border-line bg-paper text-ink"}`;
 }
 
 function btn(active = false) {

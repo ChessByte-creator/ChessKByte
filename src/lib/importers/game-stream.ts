@@ -50,7 +50,7 @@ export class GameStream {
     this.iterator = this.make(this);
   }
 
-  async take(count: number, filters: GameFilters, signal?: AbortSignal, onScan?: (scanned: number, percent: number) => void): Promise<GameRecord[]> {
+  async take(count: number, filters: GameFilters, signal?: AbortSignal, onScan?: (scanned: number, percent: number) => void, onFound?: (rows: GameRecord[]) => void): Promise<GameRecord[]> {
     const match = gameMatcher(filters);
     const found: GameRecord[] = [];
     let sinceYield = 0;
@@ -62,7 +62,10 @@ export class GameStream {
         break;
       }
       const game = step.value;
-      if (game && match(game)) found.push(game);
+      if (game && match(game)) {
+        found.push(game);
+        onFound?.([game]);
+      }
       sinceYield += 1;
       if (sinceYield >= 2000) {
         sinceYield = 0;

@@ -42,7 +42,9 @@ import { SHAPE_COLORS, toggleShape, type Shape, type ShapeColor } from "@/lib/sh
 import { PERSONALITIES, personalityById, pickStyledMove, type PersonalityId } from "@/lib/style";
 import { PuzzleScreen } from "@/components/chess/PuzzleScreen";
 import { OpeningsScreen } from "@/components/chess/OpeningsScreen";
+import { GameInfoCard } from "@/components/chess/GameInfoCard";
 import { RepositoryScreen } from "@/components/chess/RepositoryScreen";
+import type { GameInfo } from "@/lib/game-info";
 import { ByteMark } from "@/components/chess/ByteMark";
 import { byteQuip } from "@/lib/byte-voice";
 
@@ -117,6 +119,7 @@ export function ChessApp() {
   const [openings, setOpenings] = useState<OpeningsIndex | null>(null);
   const [quip, setQuip] = useState(() => byteQuip(0));
   const [view, setView] = useState<View>("match");
+  const [gameInfo, setGameInfo] = useState<GameInfo | null>(null);
   const [whiteBot, setWhiteBot] = useState<BotSeat>({ styleId: "aggressive", rating: 1600 });
   const [blackBot, setBlackBot] = useState<BotSeat>({ styleId: "positional", rating: 1600 });
   const [duelRun, setDuelRun] = useState(false);
@@ -668,6 +671,7 @@ export function ChessApp() {
     setLines([]);
     setLive(ZERO);
     setRemark("");
+    setGameInfo(null);
     setSearchGen((value) => value + 1);
   }
 
@@ -730,7 +734,7 @@ export function ChessApp() {
   }
 
   /** Abre uma linha de abertura ou uma partida do repositório no modo análise. */
-  function openLineInAnalysis(next: Ply[], at: "start" | "end" = "end") {
+  function openLineInAnalysis(next: Ply[], at: "start" | "end" = "end", info: GameInfo | null = null) {
     setDuelRun(false);
     matchSnap.current = null;
     setView("match");
@@ -738,6 +742,7 @@ export function ChessApp() {
     setFlipped(false);
     setTab("game");
     if (at === "start") setCursor(0);
+    setGameInfo(info);
     setNotice("Carregado no modo análise.");
   }
 
@@ -1117,7 +1122,7 @@ export function ChessApp() {
       ) : null}
       {view === "repo" || visited.repo ? (
         <div hidden={view !== "repo"}>
-          <RepositoryScreen openings={openings} onOpen={openLineInAnalysis} />
+          <RepositoryScreen openings={openings} onOpen={openLineInAnalysis} active={view === "repo"} />
         </div>
       ) : null}
       {view === "puzzle" || view === "repo" ? null : view === "library" ? (
@@ -1125,6 +1130,7 @@ export function ChessApp() {
       ) : (
       <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <section className="flex flex-col gap-3">
+          {gameInfo && mode === "analyze" ? <GameInfoCard info={gameInfo} onBack={() => openView("repo")} onDismiss={() => setGameInfo(null)} /> : null}
           <div className="mx-auto grid h-10 w-full max-w-xl grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3">
             <p className="truncate text-sm text-ink">{status}</p>
             <p className="row-span-2 font-mono text-sm tabular-nums text-ink">{formatEval(shownEval)}</p>

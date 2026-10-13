@@ -13,6 +13,7 @@ export type EcRequest =
   | { id: number; type: "open"; file: File }
   | { id: number; type: "ids"; kind: "players" | "events"; text: string }
   | { id: number; type: "page"; filter: EcFilter; afterId: number; untilId: number; limit: number }
+  | { id: number; type: "pageByPlayerIndex"; filter: EcFilter; afterId: number; limit: number }
   | { id: number; type: "game"; rowId: number; maxPlies?: number }
   | { id: number; type: "close" };
 
@@ -47,6 +48,8 @@ async function handle(request: EcRequest): Promise<unknown> {
       return database ? database.ids(request.kind, request.text) : [];
     case "page":
       return database ? database.page(request.filter, request.afterId, request.untilId, request.limit) : [];
+    case "pageByPlayerIndex":
+      return database ? database.pageByPlayerIndex(request.filter, request.afterId, request.limit) : [];
     case "game":
       return database ? database.loadGame(request.rowId, request.maxPlies) : null;
     case "close":

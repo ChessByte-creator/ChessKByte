@@ -11,7 +11,16 @@ export interface GameSource {
   done: boolean;
   percent: number;
   readonly format: string;
-  take(count: number, filters: GameFilters, signal?: AbortSignal, onScan?: (scanned: number, percent: number) => void): Promise<GameRecord[]>;
+  take(
+    count: number,
+    filters: GameFilters,
+    signal?: AbortSignal,
+    onScan?: (scanned: number, percent: number) => void,
+    /** Chamado assim que partidas que passam nos filtros são achadas (a página ainda não está completa). */
+    onFound?: (rows: GameRecord[]) => void,
+  ): Promise<GameRecord[]>;
+  /** Nome do tipo de filtro que usa índice no arquivo, se houver (só para avisar o jogador). */
+  readonly playerIndexed?: boolean;
   restart(): void;
   close(): void;
   /** Só nas fontes que guardam os lances em formato binário (En Croissant): decodifica ao abrir a partida. */

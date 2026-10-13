@@ -3,11 +3,11 @@ import * as VFS from "wa-sqlite/src/VFS.js";
 /** Leitura síncrona de um arquivo (no navegador: File + FileReaderSync dentro de um Worker). */
 export type SyncReader = { size: number; read: (offset: number, length: number) => Uint8Array };
 
-const BLOCK = 256 * 1024;
-const MAX_BLOCKS = 64; // ~16 MB de cache
+const BLOCK = 64 * 1024;
+const MAX_BLOCKS = 256; // ~16 MB de cache
 
 /**
- * Cache de blocos de 256 KB: o SQLite pede páginas de 4 KB (ou 64 KB); ler o disco/arquivo de pouco em pouco
+ * Cache de blocos de 64 KB: o SQLite pede páginas de 4 KB (ou 64 KB); ler o disco/arquivo de pouco em pouco
  * seria lento. Só os blocos tocados pelas consultas são lidos; o arquivo inteiro nunca vai para a memória.
  */
 export function cachedReader(raw: SyncReader): SyncReader {

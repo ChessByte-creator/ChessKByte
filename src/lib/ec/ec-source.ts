@@ -5,8 +5,10 @@ import { filterOpenings, kindOf, matchOpening, type Opening, type OpeningsIndex 
 import { EcClient } from "./ec-client";
 import type { EcFilter, EcInfo, EcRow } from "./ec-engine";
 
-/** Quantas linhas (por ID) cada consulta percorre antes de devolver o controle (progresso e botão "Parar"). */
-const RANGE = 120_000;
+/** Cada consulta deve levar cerca de meio segundo: assim o progresso anda e o "Parar" responde rápido. */
+const TARGET_MS = 450;
+const MIN_RANGE = 4_000;
+const MAX_RANGE = 600_000;
 
 function norm(value: string) {
   return value
@@ -45,6 +47,7 @@ export class EcSource implements GameSource {
   readonly format = "db3";
 
   private cursor: number;
+  private range = 20_000;
   private readonly baseEco: Map<string, Opening>;
   private cachedKey = "";
   private cachedFilter: EcFilter | null = null;
@@ -105,6 +108,11 @@ export class EcSource implements GameSource {
     this.scanned = 0;
     this.percent = 0;
     this.done = false;
+  }
+
+  /** Há índice de jogador no arquivo? Então a busca por jogador não precisa varrer o banco. */
+  get playerIndexed() {
+    return this.info.indexed.includes("whiteid") && this.info.indexed.includes("blackid");
   }
 
   close() {
@@ -185,25 +193,59 @@ export class EcSource implements GameSource {
     };
   }
 
-  async take(count: number, filters: GameFilters, signal?: AbortSignal, onScan?: (scanned: number, percent: number) => void): Promise<GameRecord[]> {
+  async take(
+    count: number,
+    filters: GameFilters,
+    signal?: AbortSignal,
+    onScan?: (scanned: number, percent: number) => void,
+    onFound?: (rows: GameRecord[]) => void,
+  ): Promise<GameRecord[]> {
     const filter = await this.translate(filters);
     const found: GameRecord[] = [];
     const span = Math.max(1, this.info.maxId - this.info.minId + 1);
+    const progress = () => {
+      this.scanned = Math.max(0, this.cursor - this.info.minId + 1);
+      this.percent = Math.min(100, (this.scanned / span) * 100);
+      onScan?.(this.scanned, this.percent);
+    };
+
+    // Caminho rápido: jogador com índice no arquivo. Uma consulta devolve a página inteira.
+    if (this.client && filter.playerIds && this.playerIndexed && filter.playerIds.length > 0 && filter.playerIds.length <= 12) {
+      if (!this.done && !signal?.aborted) {
+        const rows = await this.client.pageByPlayerIndex(filter, this.cursor, count);
+        const records = rows.map((row) => this.toRecord(row));
+        found.push(...records);
+        if (records.length > 0) onFound?.(records);
+        if (rows.length < count) {
+          this.cursor = this.info.maxId;
+          this.done = true;
+        } else {
+          this.cursor = rows[rows.length - 1].id;
+        }
+        progress();
+      }
+      return found;
+    }
+
     while (found.length < count && !this.done) {
       if (signal?.aborted) break;
       const need = count - found.length;
-      const upper = Math.min(this.cursor + RANGE, this.info.maxId);
+      const upper = Math.min(this.cursor + this.range, this.info.maxId);
+      const started = Date.now();
       const rows = await this.client.page(filter, this.cursor, upper, need);
-      for (const row of rows) found.push(this.toRecord(row));
+      const elapsed = Date.now() - started;
+      // Ajusta o tamanho da próxima faixa para cada consulta durar ~meio segundo.
+      this.range = Math.round(Math.min(MAX_RANGE, Math.max(MIN_RANGE, (this.range * TARGET_MS) / Math.max(elapsed, 25))));
+      const records = rows.map((row) => this.toRecord(row));
+      found.push(...records);
+      if (records.length > 0) onFound?.(records);
       if (rows.length >= need) {
         this.cursor = rows[rows.length - 1].id;
       } else {
         this.cursor = upper;
         if (upper >= this.info.maxId) this.done = true;
       }
-      this.scanned = Math.max(0, this.cursor - this.info.minId + 1);
-      this.percent = Math.min(100, (this.scanned / span) * 100);
-      onScan?.(this.scanned, this.percent);
+      progress();
     }
     return found;
   }

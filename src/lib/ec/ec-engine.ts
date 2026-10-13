@@ -62,6 +62,8 @@ export type EcInfo = {
   /** Valores distintos de Result vistos nas primeiras linhas (para montar o filtro de resultado). */
   resultSample: Array<string | number>;
   tables: string[];
+  /** Primeira coluna de cada índice da tabela Games, em minúsculas (ex.: "whiteid"). O En Croissant cria esses índices pelo menu do banco. */
+  indexed: string[];
 };
 
 export type NotEc = { ec: false; tables: string[] };
@@ -182,7 +184,17 @@ export class EcDatabase {
       resultSample = [...seen];
     }
 
-    const info: EcInfo = { minId, maxId, declaredGames, title, resultSample, tables };
+    const indexed: string[] = [];
+    try {
+      for (const index of await select(`PRAGMA index_list(${q(gamesTable)})`)) {
+        const first = (await select(`PRAGMA index_info(${q(String(index[1]))})`))[0];
+        if (first) indexed.push(norm(String(first[2])));
+      }
+    } catch {
+      /* sem a informação, a busca só varre por ID */
+    }
+
+    const info: EcInfo = { minId, maxId, declaredGames, title, resultSample, tables, indexed };
     return new EcDatabase(sqlite3, db, info, g, names, gamesTable);
   }
 
@@ -193,16 +205,55 @@ export class EcDatabase {
   /** IDs de jogadores/eventos pelo nome (busca por parte do nome, sem diferenciar maiúsculas). */
   async ids(kind: "players" | "events", text: string, limit = 3000): Promise<number[]> {
     const t = this.names[kind];
-    if (!t || !text.trim()) return [];
-    const rows = await this.select(`SELECT ${q(t.id)} FROM ${q(t.table)} WHERE ${q(t.name)} LIKE ? LIMIT ${limit}`, [`%${text.trim().replace(/[%_]/g, "")}%`]);
+    const clean = text.trim().replace(/[%_]/g, "");
+    if (!t || !clean) return [];
+    // 1) Começo do nome (usa o índice UNIQUE de Name: instantâneo mesmo com milhões de jogadores).
+    //    O índice diferencia maiúsculas, então tenta como digitado, Capitalizado, minúsculo e MAIÚSCULO.
+    const variants = [...new Set([clean, clean[0].toUpperCase() + clean.slice(1), clean.toLowerCase(), clean.toUpperCase()])];
+    const found = new Set<number>();
+    for (const variant of variants) {
+      const rows = await this.select(`SELECT ${q(t.id)} FROM ${q(t.table)} WHERE ${q(t.name)} >= ? AND ${q(t.name)} < ? LIMIT 200`, [variant, `${variant}\uffff`]);
+      for (const row of rows) found.add(Number(row[0]));
+    }
+    if (found.size > 0) return [...found];
+    // 2) Parte do nome em qualquer lugar: percorre a tabela de nomes (mais lento, por isso só se o começo não achou nada).
+    const rows = await this.select(`SELECT ${q(t.id)} FROM ${q(t.table)} WHERE ${q(t.name)} LIKE ? LIMIT ${limit}`, [`%${clean}%`]);
     return rows.map((row) => Number(row[0]));
   }
 
+  /** Verdadeiro se dá para achar as partidas desses jogadores pelo índice (sem varrer a tabela). */
+  canUsePlayerIndex(playerIds: number[] | undefined) {
+    return !!playerIds && playerIds.length > 0 && playerIds.length <= 12 && this.info.indexed.includes("whiteid") && this.info.indexed.includes("blackid");
+  }
+
+  /**
+   * Partidas dos jogadores usando os índices de WhiteID/BlackID: cada (lado, jogador) é uma consulta que já sai
+   * em ordem de ID e para no limite; depois é só juntar. O custo é proporcional à página, não ao tamanho do arquivo.
+   */
+  async pageByPlayerIndex(filter: EcFilter, afterId: number, limit: number): Promise<EcRow[]> {
+    const g = this.g;
+    const ids = (filter.playerIds ?? []).filter((value) => Number.isInteger(value));
+    const rest: EcFilter = { ...filter, playerIds: undefined };
+    const lists: EcRow[][] = [];
+    for (const id of ids) {
+      for (const side of [g.whiteId, g.blackId] as string[]) {
+        lists.push(await this.page(rest, afterId, this.info.maxId, limit, { column: side, id }));
+      }
+    }
+    const merged = new Map<number, EcRow>();
+    for (const list of lists) for (const row of list) merged.set(row.id, row);
+    return [...merged.values()].sort((a, b) => a.id - b.id).slice(0, limit);
+  }
+
   /** Partidas com ID em (afterId, untilId] que passam nos filtros, em ordem de ID, no máximo `limit`. */
-  async page(filter: EcFilter, afterId: number, untilId: number, limit: number): Promise<EcRow[]> {
+  async page(filter: EcFilter, afterId: number, untilId: number, limit: number, only?: { column: string; id: number }): Promise<EcRow[]> {
     const g = this.g;
     const where: string[] = [`g.${q(g.id as string)} > ?`, `g.${q(g.id as string)} <= ?`];
     const params: unknown[] = [afterId, untilId];
+    if (only) {
+      where.push(`g.${q(only.column)} = ?`);
+      params.push(only.id);
+    }
 
     if (filter.playerIds) {
       const list = ints(filter.playerIds);

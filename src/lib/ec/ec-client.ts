@@ -47,6 +47,10 @@ export class EcClient {
     return this.call<EcRow[]>({ type: "page", filter, afterId, untilId, limit });
   }
 
+  pageByPlayerIndex(filter: EcFilter, afterId: number, limit: number) {
+    return this.call<EcRow[]>({ type: "pageByPlayerIndex", filter, afterId, limit });
+  }
+
   game(rowId: number, maxPlies?: number) {
     return this.call<{ plies: Ply[]; san: string; ok: boolean } | null>({ type: "game", rowId, maxPlies });
   }

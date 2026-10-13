@@ -1,0 +1,22 @@
+import fs from "node:fs";
+import SQLiteESMFactory from "wa-sqlite/dist/wa-sqlite.mjs";
+import * as SQLite from "wa-sqlite";
+import { EcDatabase } from "./ec-bundle.mjs";
+const path = process.argv[2] ?? "/tmp/ec-big.db3"; const fd = fs.openSync(path, "r"); let bytes = 0;
+const reader = { size: fs.statSync(path).size, read(o, l) { const b = Buffer.alloc(l); const n = fs.readSync(fd, b, 0, l, o); bytes += n; return new Uint8Array(b.buffer, b.byteOffset, n); } };
+const sqlite3 = SQLite.Factory(await SQLiteESMFactory({ wasmBinary: fs.readFileSync("/tmp/proto/node_modules/wa-sqlite/dist/wa-sqlite.wasm") }));
+const T = async (label, fn) => { const t = Date.now(), b = bytes; const r = await fn(); console.log(label.padEnd(44), String(Date.now() - t).padStart(6), "ms", ((bytes - b) / 1e6).toFixed(1).padStart(7), "MB", Array.isArray(r) ? `(${r.length})` : ""); return r; };
+const db = await T("abrir", () => EcDatabase.open(sqlite3, reader, "b.db3"));
+const R = 120000, max = db.info.maxId;
+await T("página 1 sem filtro (25)", () => db.page({}, 0, R, 25));
+await T("ids jogador 'magnus' (LIKE %x%)", () => db.ids("players", "magnus"));
+await T("ids jogador 'Player0123' (LIKE %x%)", () => db.ids("players", "Player0123"));
+await T("ids evento 'blitz' (LIKE %x%)", () => db.ids("events", "blitz"));
+const ids = await db.ids("players", "magnus");
+await T("página jogador Magnus (25) 1 faixa", () => db.page({ playerIds: ids }, 0, R, 25));
+const one = await db.ids("players", "Player000777");
+await T("jogador raro: 1 faixa de 120k sem achar", () => db.page({ playerIds: one }, 0, R, 25));
+let total = 0; const t0 = Date.now(), b0 = bytes;
+for (let c = 0; c < max; c += R) { total += (await db.page({ playerIds: one }, c, Math.min(c + R, max), 25)).length; }
+console.log("varredura completa jogador raro:", Date.now() - t0, "ms,", ((bytes - b0) / 1e6).toFixed(0), "MB, achou", total);
+await T("elo>=2400 + ECO B07 (25)", () => db.page({ minElo: 2400, ecoPrefix: "B07" }, 0, R, 25));
