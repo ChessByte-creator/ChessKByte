@@ -28,6 +28,8 @@ export type GameRecord = {
   /** Lances em SAN, separados por espaço, sem números. */
   moves: string;
   source: string;
+  /** Partidas lidas de um banco do En Croissant: ID da linha. Os lances só são decodificados ao abrir. */
+  ecId?: number;
 };
 
 export type GameFilters = {

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { clearGames, countGames, deleteSource, listSources, searchGames, topFamilies, type GameFilters, type GameRecord, type GameResult, type SourceInfo } from "@/lib/games-db";
 import { importGameFile } from "@/lib/importers/game-import";
-import { GameStream } from "@/lib/importers/game-stream";
+import { openGameSource, type GameSource } from "@/lib/importers/game-source";
+import { clearRepoSession, repoSession } from "@/lib/repo-session";
 import { pliesFromSan, type Ply } from "@/lib/game";
 import { KIND_LABEL, openingNamePt, type OpeningKind, type OpeningsIndex } from "@/lib/openings";
 
@@ -16,33 +17,33 @@ const PAGE_SIZES = [10, 25, 50, 100] as const;
 const RESULT_LABEL: Record<GameResult, string> = { "1-0": "1–0", "0-1": "0–1", "1/2-1/2": "½–½", "*": "*" };
 
 export function RepositoryScreen({ openings, onOpen }: Props) {
-  const [mode, setMode] = useState<Mode>("file");
-  const [pageSize, setPageSize] = useState<number>(25);
+  const [mode, setMode] = useState<Mode>(repoSession.mode);
+  const [pageSize, setPageSize] = useState<number>(repoSession.pageSize);
 
   // filtros: o que está nos campos (rascunho) e o que foi aplicado na última busca
-  const [player, setPlayer] = useState("");
-  const [text, setText] = useState("");
-  const [kind, setKind] = useState<OpeningKind | "gambit" | "all">("all");
-  const [result, setResult] = useState<GameResult | "all">("all");
-  const [family, setFamily] = useState("");
-  const [elo, setElo] = useState(0);
-  const [yearFrom, setYearFrom] = useState("");
-  const [yearTo, setYearTo] = useState("");
-  const [source, setSource] = useState("");
+  const [player, setPlayer] = useState(repoSession.draft?.player ?? "");
+  const [text, setText] = useState(repoSession.draft?.text ?? "");
+  const [kind, setKind] = useState<OpeningKind | "gambit" | "all">(repoSession.draft?.kind ?? "all");
+  const [result, setResult] = useState<GameResult | "all">(repoSession.draft?.result ?? "all");
+  const [family, setFamily] = useState(repoSession.draft?.family ?? "");
+  const [elo, setElo] = useState(repoSession.draft?.elo ?? 0);
+  const [yearFrom, setYearFrom] = useState(repoSession.draft?.yearFrom ?? "");
+  const [yearTo, setYearTo] = useState(repoSession.draft?.yearTo ?? "");
+  const [source, setSource] = useState(repoSession.draft?.source ?? "");
 
-  const [note, setNote] = useState("");
-  const [pageIdx, setPageIdx] = useState(0);
-  const [pages, setPages] = useState<GameRecord[][]>([]);
-  const [moreAhead, setMoreAhead] = useState(false);
+  const [note, setNote] = useState(repoSession.note);
+  const [pageIdx, setPageIdx] = useState(repoSession.pageIdx);
+  const [pages, setPages] = useState<GameRecord[][]>(repoSession.pages);
+  const [moreAhead, setMoreAhead] = useState(repoSession.moreAhead);
   const [busy, setBusy] = useState(false);
   const [scan, setScan] = useState({ scanned: 0, pct: 0 });
 
   // arquivo aberto sob demanda
-  const [fileInfo, setFileInfo] = useState<{ name: string; format: string } | null>(null);
-  const streamRef = useRef<GameStream | null>(null);
-  const bufferRef = useRef<GameRecord[]>([]);
-  const pagesRef = useRef<GameRecord[][]>([]);
-  const appliedRef = useRef<GameFilters>({});
+  const [fileInfo, setFileInfo] = useState<{ name: string; format: string } | null>(repoSession.fileInfo);
+  const streamRef = useRef<GameSource | null>(repoSession.source);
+  const bufferRef = useRef<GameRecord[]>(repoSession.buffer);
+  const pagesRef = useRef<GameRecord[][]>(repoSession.pages);
+  const appliedRef = useRef<GameFilters>(repoSession.applied);
   const abortRef = useRef<AbortController | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -83,12 +84,28 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
     }
   }, []);
 
+  // Valores mais recentes, para guardar na sessão quando a tela é desmontada.
+  const latest = useRef({ mode, pageSize, fileInfo, pageIdx, moreAhead, note, player, text, kind, result, family, elo, yearFrom, yearTo, source });
+  latest.current = { mode, pageSize, fileInfo, pageIdx, moreAhead, note, player, text, kind, result, family, elo, yearFrom, yearTo, source };
+
   useEffect(() => {
     void refreshMeta();
     return () => {
       abortRef.current?.abort();
       importAbort.current?.abort();
-      streamRef.current?.close();
+      // O arquivo aberto NÃO é fechado: ao voltar para esta tela, a busca continua de onde parou.
+      const l = latest.current;
+      repoSession.mode = l.mode;
+      repoSession.pageSize = l.pageSize;
+      repoSession.source = streamRef.current;
+      repoSession.fileInfo = l.fileInfo;
+      repoSession.pages = pagesRef.current;
+      repoSession.buffer = bufferRef.current;
+      repoSession.pageIdx = l.pageIdx;
+      repoSession.moreAhead = l.moreAhead;
+      repoSession.applied = appliedRef.current;
+      repoSession.note = l.note;
+      repoSession.draft = { player: l.player, text: l.text, kind: l.kind, result: l.result, family: l.family, elo: l.elo, yearFrom: l.yearFrom, yearTo: l.yearTo, source: l.source };
     };
   }, [refreshMeta]);
 
@@ -201,18 +218,22 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
     if (next === "local") void refreshMeta();
   }
 
-  async function openSourceFile(file: File) {
+  async function openSourceFile(picked: File[]) {
+    // O En Croissant guarda o banco em 2 arquivos (.db3 e .ecsi). Só o .db3 é lido; o .ecsi é o índice de posições.
+    const file = picked.find((item) => !/\.ecsi$/i.test(item.name)) ?? picked[0];
+    if (!file) return;
     abortRef.current?.abort();
-    streamRef.current?.close();
+    clearRepoSession();
     streamRef.current = null;
     setFileInfo(null);
     resetResults();
     setNote("Abrindo o arquivo…");
     try {
-      const stream = await GameStream.open(file, openings);
-      streamRef.current = stream;
-      setFileInfo({ name: file.name, format: stream.format });
+      const opened = await openGameSource(file, openings);
+      streamRef.current = opened.source;
+      setFileInfo({ name: file.name, format: opened.label });
       search(pageSize, "file");
+      if (opened.warning) setNote(opened.warning);
     } catch (error) {
       setNote(error instanceof Error && error.message ? error.message : "Não consegui abrir esse arquivo.");
     }
@@ -220,10 +241,29 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
 
   function closeSourceFile() {
     abortRef.current?.abort();
-    streamRef.current?.close();
+    clearRepoSession();
     streamRef.current = null;
     setFileInfo(null);
     resetResults();
+  }
+
+  /** Abre a partida na análise. Nos bancos do En Croissant os lances são decodificados só agora. */
+  async function openGame(game: GameRecord) {
+    const source = streamRef.current;
+    if (game.ecId != null && source?.loadPlies) {
+      try {
+        const plies = await source.loadPlies(game);
+        if (plies && plies.length > 1) {
+          onOpen(plies, "start");
+          return;
+        }
+      } catch {
+        /* cai na mensagem abaixo */
+      }
+      setNote("Não consegui decodificar os lances dessa partida.");
+      return;
+    }
+    onOpen(pliesFromSan(game.moves), "start");
   }
 
   async function importFile(file: File) {
@@ -414,7 +454,7 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
         <ul className="mt-4 flex flex-col gap-2">
           {rows.map((game, index) => (
             <li key={`${pageIdx}-${index}`}>
-              <button type="button" onClick={() => onOpen(pliesFromSan(game.moves), "start")} className="w-full rounded-lg bg-cream px-3 py-2 text-left text-sm hover:bg-soft">
+              <button type="button" onClick={() => void openGame(game)} className="w-full rounded-lg bg-cream px-3 py-2 text-left text-sm hover:bg-soft">
                 <span className="flex items-center justify-between gap-3">
                   <span className="min-w-0 truncate text-ink">
                     {game.white}
@@ -463,12 +503,13 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
               <input
                 ref={fileRef}
                 type="file"
-                accept=".pgn,.txt,.zst,.gz,.db,.sqlite,.sqlite3"
+                accept=".pgn,.txt,.zst,.gz,.db,.db3,.ecsi,.sqlite,.sqlite3"
+                multiple
                 className="sr-only"
                 onChange={(event) => {
-                  const file = event.target.files?.[0];
+                  const picked = Array.from(event.target.files ?? []);
                   event.target.value = "";
-                  if (file) void openSourceFile(file);
+                  if (picked.length > 0) void openSourceFile(picked);
                 }}
               />
               <div className="mt-3 grid grid-cols-2 gap-2">
@@ -485,7 +526,7 @@ export function RepositoryScreen({ openings, onOpen }: Props) {
                 </p>
               ) : null}
               <p className="mt-3 text-sm text-muted">
-                Aceita PGN em .pgn, .pgn.zst ou .pgn.gz (as bases mensais da Lichess), sem limite de tamanho, e bancos SQLite (.db) com coluna pgn, ou white e moves. Cada busca recomeça do início do arquivo; “Próxima” continua de onde parou.
+                Aceita bancos do En Croissant (.db3, sem limite de tamanho: só as páginas pedidas são lidas), PGN em .pgn, .pgn.zst ou .pgn.gz (as bases mensais da Lichess) e bancos SQLite (.db) com coluna pgn, ou white e moves. Você pode escolher o .db3 e o .ecsi juntos; o .ecsi (busca por posição) ainda não é usado. Cada busca recomeça do início; “Próxima” continua de onde parou.
               </p>
             </>
           ) : (
