@@ -11,6 +11,7 @@ declare class FileReaderSync {
 
 export type EcRequest =
   | { id: number; type: "open"; file: File }
+  | { id: number; type: "diagnose"; file: File }
   | { id: number; type: "ids"; kind: "players" | "events"; text: string }
   | { id: number; type: "page"; filter: EcFilter; afterId: number; untilId: number; limit: number }
   | { id: number; type: "pageByPlayerIndex"; filter: EcFilter; afterId: number; limit: number }
@@ -32,8 +33,41 @@ async function engine() {
   return sqlite3;
 }
 
+/** Passo a passo do que o aparelho consegue fazer, para descobrir por que um arquivo não abre. */
+async function diagnose(file: File) {
+  const out: Record<string, string | number | boolean> = {
+    webassembly: typeof WebAssembly === "object",
+    fileReaderSync: typeof FileReaderSync !== "undefined",
+    fileName: file.name,
+    fileSize: file.size,
+    fileType: file.type || "(sem tipo)",
+  };
+  try {
+    const sync = new FileReaderSync();
+    const head = new Uint8Array(sync.readAsArrayBuffer(file.slice(0, 16)));
+    out.header = String.fromCharCode(...head.slice(0, 15));
+    out.readOk = head.length > 0;
+    if (file.size > 4096) {
+      const tail = new Uint8Array(sync.readAsArrayBuffer(file.slice(file.size - 16, file.size)));
+      out.readEndOk = tail.length > 0;
+    }
+  } catch (error) {
+    out.readOk = false;
+    out.readError = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  }
+  try {
+    await engine();
+    out.engine = "ok";
+  } catch (error) {
+    out.engine = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  }
+  return out;
+}
+
 async function handle(request: EcRequest): Promise<unknown> {
   switch (request.type) {
+    case "diagnose":
+      return diagnose(request.file);
     case "open": {
       if (database) await database.close();
       database = null;

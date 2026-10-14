@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearGames, countGames, deleteSource, listSources, searchGames, topFamilies, type GameFilters, type GameRecord, type GameResult, type SourceInfo } from "@/lib/games-db";
 import { importGameFile } from "@/lib/importers/game-import";
 import { openGameSource, type GameSource } from "@/lib/importers/game-source";
 import { clearRepoSession, repoSession } from "@/lib/repo-session";
 import { pliesFromSan, type Ply } from "@/lib/game";
 import { infoFromRecord, type GameInfo } from "@/lib/game-info";
-import { ECO_VOLUMES, KIND_LABEL, openingNamePt, type OpeningKind, type OpeningsIndex } from "@/lib/openings";
+import { KIND_LABEL, openingNamePt, type OpeningKind, type OpeningsIndex } from "@/lib/openings";
+import { norm, saveRecent, tokenLabel, tokensToFilters, type Token } from "@/lib/search-tokens";
+import { SearchBox } from "@/components/chess/SearchBox";
 
 type Props = {
   openings: OpeningsIndex | null;
@@ -32,17 +34,31 @@ const RESULT_CHIPS: Array<{ id: GameResult | "all"; label: string }> = [
   { id: "0-1", label: "Pretas" },
 ];
 const ELO_CHIPS = [0, 1500, 1800, 2000, 2200, 2400, 2600];
-/** Atalhos de abertura: preenchem o campo de busca (que entende nome em português, inglês, ECO ou lances). */
-const OPENING_SHORTCUTS = ["Siciliana", "Italiana", "Ruy Lopez", "Francesa", "Caro-Kann", "Gambito da Dama", "Índia do Rei", "Inglesa", "Escandinava", "Londres", "Gambito do Rei", "Nimzo-Indiana"];
-const ECO_SHORT: Record<string, string> = { A: "A · Flanco", B: "B · Semiaberta", C: "C · Aberta", D: "D · Fechada", E: "E · Indianas" };
+const OUTCOME_CHIPS: Array<{ id: "all" | "win" | "draw" | "loss"; label: string }> = [
+  { id: "all", label: "Qualquer" },
+  { id: "win", label: "Vitórias dele" },
+  { id: "draw", label: "Empates" },
+  { id: "loss", label: "Derrotas dele" },
+];
+const SIDE_CHIPS: Array<{ id: "any" | "white" | "black"; label: string }> = [
+  { id: "any", label: "Qualquer cor" },
+  { id: "white", label: "De brancas" },
+  { id: "black", label: "De pretas" },
+];
 
 export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
   const [mode, setMode] = useState<Mode>(repoSession.mode);
   const [pageSize, setPageSize] = useState<number>(repoSession.pageSize);
 
   // filtros: o que está nos campos (rascunho) e o que foi aplicado na última busca
-  const [player, setPlayer] = useState(repoSession.draft?.player ?? "");
-  const [text, setText] = useState(repoSession.draft?.text ?? "");
+  const [tokens, setTokens] = useState<Token[]>(repoSession.draft?.tokens ?? []);
+  const [appliedTokens, setAppliedTokens] = useState<Token[]>(repoSession.draft?.appliedTokens ?? []);
+  const [side, setSide] = useState<"any" | "white" | "black">(repoSession.draft?.side ?? "any");
+  const [outcome, setOutcome] = useState<"all" | "win" | "draw" | "loss">(repoSession.draft?.outcome ?? "all");
+  const [playerTotal, setPlayerTotal] = useState<number | null>(null);
+  const [filtersVersion, setFiltersVersion] = useState(0);
+  const [coarse, setCoarse] = useState(false);
+  const mounted = useRef(false);
   const [kind, setKind] = useState<OpeningKind | "gambit" | "all">(repoSession.draft?.kind ?? "all");
   const [result, setResult] = useState<GameResult | "all">(repoSession.draft?.result ?? "all");
   const [family, setFamily] = useState(repoSession.draft?.family ?? "");
@@ -86,11 +102,13 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
   const localSeq = useRef(0);
 
   function currentFilters(): GameFilters {
+    const hasPlayer = tokens.some((token) => token.kind === "player");
     return {
-      player: player.trim() || undefined,
-      text: text.trim() || undefined,
+      ...tokensToFilters(tokens),
+      playerSide: hasPlayer && side !== "any" ? side : undefined,
+      outcome: hasPlayer && outcome !== "all" ? outcome : undefined,
       kind,
-      result,
+      result: hasPlayer ? "all" : result,
       family: mode === "local" ? family || undefined : undefined,
       minElo: elo || undefined,
       yearFrom: Number(yearFrom) || undefined,
@@ -110,8 +128,8 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
   }, []);
 
   // Valores mais recentes, para guardar na sessão quando a tela é desmontada.
-  const latest = useRef({ mode, pageSize, fileInfo, pageIdx, moreAhead, note, player, text, kind, result, family, elo, yearFrom, yearTo, source });
-  latest.current = { mode, pageSize, fileInfo, pageIdx, moreAhead, note, player, text, kind, result, family, elo, yearFrom, yearTo, source };
+  const latest = useRef({ mode, pageSize, fileInfo, pageIdx, moreAhead, note, tokens, appliedTokens, side, outcome, kind, result, family, elo, yearFrom, yearTo, source });
+  latest.current = { mode, pageSize, fileInfo, pageIdx, moreAhead, note, tokens, appliedTokens, side, outcome, kind, result, family, elo, yearFrom, yearTo, source };
 
   useEffect(() => {
     void refreshMeta();
@@ -130,9 +148,28 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
       repoSession.moreAhead = l.moreAhead;
       repoSession.applied = appliedRef.current;
       repoSession.note = l.note;
-      repoSession.draft = { player: l.player, text: l.text, kind: l.kind, result: l.result, family: l.family, elo: l.elo, yearFrom: l.yearFrom, yearTo: l.yearTo, source: l.source };
+      repoSession.draft = { tokens: l.tokens, appliedTokens: l.appliedTokens, side: l.side, outcome: l.outcome, kind: l.kind, result: l.result, family: l.family, elo: l.elo, yearFrom: l.yearFrom, yearTo: l.yearTo, source: l.source };
     };
   }, [refreshMeta]);
+
+  // Celular: o seletor de arquivos filtrado por extensão esconde formatos que o Android não conhece (como .db3).
+  useEffect(() => {
+    setCoarse(typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches);
+  }, []);
+
+  // Escolher uma etiqueta ou um chip já refaz a busca (sem precisar achar o botão lá embaixo no celular).
+  const bump = () => setFiltersVersion((value) => value + 1);
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    if (filtersVersion === 0) return;
+    if (mode === "file" ? !streamRef.current : !total) return;
+    const timer = window.setTimeout(() => search(pageSize, mode, false), 400);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtersVersion]);
 
   // Ao trocar de página, volta ao topo da lista (senão o jogador fica no fim da página nova, sem ver nada).
   useEffect(() => {
@@ -231,10 +268,22 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
   }
 
   /** Aplica os filtros dos campos e volta para a página 1 (no arquivo, recomeça a leitura do início). */
-  function search(size = pageSize, nextMode = mode) {
-    setFiltersOpen(false);
+  function search(size = pageSize, nextMode = mode, collapse = true) {
+    if (collapse) setFiltersOpen(false);
     resetResults();
     appliedRef.current = { ...currentFilters(), family: nextMode === "local" ? family || undefined : undefined, source: nextMode === "local" ? source || undefined : undefined };
+    setAppliedTokens(tokens);
+    saveRecent(tokens);
+    setPlayerTotal(null);
+    if (nextMode === "file" && appliedRef.current.player && streamRef.current?.playerCount) {
+      const snapshot = appliedRef.current;
+      void streamRef.current.playerCount(snapshot).then(
+        (count) => {
+          if (appliedRef.current === snapshot) setPlayerTotal(count);
+        },
+        () => undefined,
+      );
+    }
     if (nextMode === "file") {
       if (!streamRef.current) {
         setNote("Abra um arquivo de partidas para começar.");
@@ -284,7 +333,7 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
       const opened = await openGameSource(file, openings);
       streamRef.current = opened.source;
       setFileInfo({ name: file.name, format: opened.label });
-      search(pageSize, "file");
+      search(pageSize, "file", false);
       if (opened.warning) setNote(opened.warning);
     } catch (error) {
       setNote(error instanceof Error && error.message ? error.message : "Não consegui abrir esse arquivo.");
@@ -360,18 +409,38 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
   const hasNext = pageIdx < pages.length - 1 || moreAhead;
 
   const applied = appliedRef.current;
+  // Estável entre renders (a caixa de busca refaz a consulta se esta função mudar). Muda só ao abrir outro arquivo.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const suggestPlayers = useMemo(() => streamRef.current?.suggestPlayers?.bind(streamRef.current), [fileInfo]);
+
+  const hasPlayerToken = tokens.some((token) => token.kind === "player");
   const summary = [
-    applied.player ? `Jogador: ${applied.player}` : "",
-    applied.text ? applied.text : "",
+    ...appliedTokens.map(tokenLabel),
+    applied.playerSide ? (applied.playerSide === "white" ? "De brancas" : "De pretas") : "",
+    applied.outcome ? OUTCOME_CHIPS.find((chip) => chip.id === applied.outcome)?.label ?? "" : "",
     applied.kind && applied.kind !== "all" ? KIND_CHIPS.find((chip) => chip.id === applied.kind)?.label ?? "" : "",
     applied.result && applied.result !== "all" ? RESULT_CHIPS.find((chip) => chip.id === applied.result)?.label ?? "" : "",
     applied.minElo ? `${applied.minElo}+` : "",
     applied.yearFrom || applied.yearTo ? `${applied.yearFrom ?? ""}–${applied.yearTo ?? ""}` : "",
   ].filter(Boolean);
 
+  /** Do ponto de vista do jogador buscado: venceu, perdeu ou empatou (null se não der para saber). */
+  const query = applied.player ? norm(applied.player) : "";
+  function perspective(game: GameRecord): "win" | "loss" | "draw" | null {
+    if (!query || game.result === "*") return null;
+    const white = norm(game.white).includes(query);
+    const black = norm(game.black).includes(query);
+    const asWhite = white && applied.playerSide !== "black";
+    const asBlack = black && applied.playerSide !== "white";
+    if (!asWhite && !asBlack) return null;
+    if (game.result === "1/2-1/2") return "draw";
+    return (game.result === "1-0") === asWhite ? "win" : "loss";
+  }
+
   function clearFilters() {
-    setPlayer("");
-    setText("");
+    setTokens([]);
+    setSide("any");
+    setOutcome("all");
     setKind("all");
     setResult("all");
     setFamily("");
@@ -414,46 +483,56 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
             search();
           }}
         >
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Jogador" id="repo-player">
-              <input id="repo-player" value={player} onChange={(event) => setPlayer(event.target.value)} className={input()} placeholder="começo do nome (ex.: Magnus)" enterKeyHint="search" />
-            </Field>
-            <Field label="Abertura, ECO ou evento" id="repo-text">
-              <input id="repo-text" value={text} onChange={(event) => setText(event.target.value)} className={input()} placeholder="najdorf, B90, torneio…" enterKeyHint="search" />
-            </Field>
+          <SearchBox tokens={tokens} onChange={(next) => { setTokens(next); bump(); }} openings={openings} suggestPlayers={suggestPlayers} onSubmit={() => search()} />
+
+          {hasPlayerToken ? (
+            <>
+              <ChipRow label="Cor do jogador">
+                {SIDE_CHIPS.map((item) => (
+                  <button key={item.id} type="button" aria-pressed={side === item.id} className={chip(side === item.id)} onClick={() => { setSide(item.id); bump(); }}>
+                    {item.label}
+                  </button>
+                ))}
+              </ChipRow>
+              <ChipRow label="Resultado dele">
+                {OUTCOME_CHIPS.map((item) => (
+                  <button key={item.id} type="button" aria-pressed={outcome === item.id} className={chip(outcome === item.id)} onClick={() => { setOutcome(item.id); bump(); }}>
+                    {item.label}
+                  </button>
+                ))}
+              </ChipRow>
+            </>
+          ) : null}
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <button type="submit" className={btn(true)} disabled={busy}>
+              {pages.length > 0 ? "Ver resultados" : "Buscar"}
+            </button>
+            <button type="button" className={btn()} onClick={clearFilters} disabled={busy}>
+              Limpar filtros
+            </button>
           </div>
 
-          <ChipRow label="Abertura rápida">
-            {OPENING_SHORTCUTS.map((name) => (
-              <button key={name} type="button" aria-pressed={text === name} className={chip(text === name)} onClick={() => setText(text === name ? "" : name)}>
-                {name}
-              </button>
-            ))}
-          </ChipRow>
-          <ChipRow label="Grupo ECO">
-            {ECO_VOLUMES.map((volume) => (
-              <button key={volume.id} type="button" aria-pressed={text.toUpperCase() === volume.id} className={chip(text.toUpperCase() === volume.id)} onClick={() => setText(text.toUpperCase() === volume.id ? "" : volume.id)}>
-                {ECO_SHORT[volume.id] ?? volume.id}
-              </button>
-            ))}
-          </ChipRow>
+          <details className="mt-3">
+            <summary className="min-h-11 cursor-pointer py-2 text-sm text-ink">Mais filtros (tipo, rating, ano…)</summary>
           <ChipRow label="Tipo">
             {KIND_CHIPS.map((item) => (
-              <button key={item.id} type="button" aria-pressed={kind === item.id} className={chip(kind === item.id)} onClick={() => setKind(item.id)}>
+              <button key={item.id} type="button" aria-pressed={kind === item.id} className={chip(kind === item.id)} onClick={() => { setKind(item.id); bump(); }}>
                 {item.label}
               </button>
             ))}
           </ChipRow>
-          <ChipRow label="Quem venceu">
-            {RESULT_CHIPS.map((item) => (
-              <button key={item.id} type="button" aria-pressed={result === item.id} className={chip(result === item.id)} onClick={() => setResult(item.id)}>
-                {item.label}
-              </button>
-            ))}
-          </ChipRow>
+          {hasPlayerToken ? null : (
+            <ChipRow label="Quem venceu">
+              {RESULT_CHIPS.map((item) => (
+                <button key={item.id} type="button" aria-pressed={result === item.id} className={chip(result === item.id)} onClick={() => { setResult(item.id); bump(); }}>
+                  {item.label}
+                </button>
+              ))}
+            </ChipRow>
+          )}
           <ChipRow label="Rating mínimo (o mais forte)">
             {ELO_CHIPS.map((value) => (
-              <button key={value} type="button" aria-pressed={elo === value} className={chip(elo === value)} onClick={() => setElo(value)}>
+              <button key={value} type="button" aria-pressed={elo === value} className={chip(elo === value)} onClick={() => { setElo(value); bump(); }}>
                 {value === 0 ? "Qualquer" : `${value}+`}
               </button>
             ))}
@@ -510,14 +589,7 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
             </ChipRow>
           ) : null}
 
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <button type="submit" className={btn(true)} disabled={busy}>
-              Buscar
-            </button>
-            <button type="button" className={btn()} onClick={clearFilters} disabled={busy}>
-              Limpar filtros
-            </button>
-          </div>
+          </details>
         </form>
 
         {busy ? (
@@ -540,6 +612,23 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
           </div>
         ) : null}
         {note ? <p className="mt-3 text-sm text-ink">{note}</p> : null}
+
+        {applied.player && pages.length + live.length > 0 ? (
+          <div className="mt-3 rounded-lg bg-cream px-3 py-2 text-sm text-ink">
+            <p>
+              Partidas de <span className="font-medium">{applied.player}</span>
+              {applied.opponent ? (
+                <>
+                  {" "}contra <span className="font-medium">{applied.opponent}</span>
+                </>
+              ) : null}
+              {playerTotal != null && !applied.opponent && !applied.outcome && !applied.ecoIn ? <span className="text-muted"> · {playerTotal.toLocaleString("pt-BR")} no banco</span> : null}
+            </p>
+            {mode === "file" && streamRef.current?.suggestPlayers && !streamRef.current.playerIndexed ? (
+              <p className="mt-1 text-xs text-muted">Este banco não tem índice de jogadores, então a busca varre o arquivo. No En Croissant, use “criar índices” no banco para ficar instantâneo.</p>
+            ) : null}
+          </div>
+        ) : null}
 
         <ul ref={listRef} className="mt-3 flex min-h-[55vh] flex-col gap-2 scroll-mt-2" aria-busy={busy}>
           {rows.map((game, index) => {
@@ -565,6 +654,10 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
                     </span>
                     <span className="shrink-0 text-right">
                       <span className="block font-mono text-xs text-ink">{RESULT_LABEL[game.result]}</span>
+                      {(() => {
+                        const view = perspective(game);
+                        return view ? <span className={`block text-xs ${view === "win" ? "text-emerald-700" : view === "loss" ? "text-rose-700" : "text-muted"}`}>{view === "win" ? "venceu" : view === "loss" ? "perdeu" : "empatou"}</span> : null;
+                      })()}
                       {isOpened ? <span className="block text-xs text-walnut">aberta</span> : null}
                     </span>
                   </span>
@@ -612,7 +705,7 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
               <input
                 ref={fileRef}
                 type="file"
-                accept=".pgn,.txt,.zst,.gz,.db,.db3,.ecsi,.sqlite,.sqlite3"
+                accept={coarse ? undefined : ".pgn,.txt,.zst,.gz,.db,.db3,.ecsi,.sqlite,.sqlite3"}
                 multiple
                 className="sr-only"
                 onChange={(event) => {

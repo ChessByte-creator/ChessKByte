@@ -75,7 +75,22 @@ export class EcSource implements GameSource {
       return { source, warning: await source.checkOrder() };
     } catch (error) {
       client.close();
-      throw new Error(error instanceof Error && error.message ? `Não consegui abrir o banco: ${error.message}` : "Não consegui abrir o banco.");
+      const reason = error instanceof Error && error.message ? error.message : "erro desconhecido";
+      let detail = "";
+      try {
+        const probe = new EcClient();
+        try {
+          const report = await probe.diagnose(file);
+          detail = ` [diagnóstico: ${Object.entries(report)
+            .map(([key, value]) => `${key}=${String(value)}`)
+            .join("; ")}]`;
+        } finally {
+          probe.close();
+        }
+      } catch (probeError) {
+        detail = ` [diagnóstico: o leitor nem iniciou (${probeError instanceof Error ? probeError.message : "sem detalhe"}); Worker=${typeof Worker}; WebAssembly=${typeof WebAssembly}]`;
+      }
+      throw new Error(`Não consegui abrir o banco: ${reason}.${detail}`);
     }
   }
 
