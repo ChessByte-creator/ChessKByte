@@ -34,6 +34,17 @@ export type GameRecord = {
 
 export type GameFilters = {
   player?: string;
+  /** Banco do En Croissant: ID exato do jogador escolhido na lista de sugestões. */
+  playerId?: number;
+  /** Cor do jogador na partida. */
+  playerSide?: "white" | "black";
+  /** Adversário (confronto direto com `player`). */
+  opponent?: string;
+  opponentId?: number;
+  /** Resultado do ponto de vista do jogador. */
+  outcome?: "win" | "draw" | "loss";
+  /** Aberturas escolhidas: lista de códigos ECO aceitos. */
+  ecoIn?: string[];
   family?: string;
   eco?: string;
   kind?: OpeningKind | "gambit" | "all";
@@ -162,13 +173,31 @@ export function gameMatcher(filters: GameFilters): (game: GameRecord) => boolean
   return (game) => matches(game, filters, text);
 }
 
-function matches(game: GameRecord, f: GameFilters, text: string) {
-  if (f.player) {
-    const q = norm(f.player);
-    if (!game.players.some((name) => name.includes(q))) return false;
+/** O jogador (e, se houver, o adversário, a cor e o resultado dele) combina com a partida? */
+function matchesPlayer(game: GameRecord, f: GameFilters) {
+  const q = norm(f.player ?? "");
+  const opp = f.opponent ? norm(f.opponent) : "";
+  const names = [game.players[0] ?? "", game.players[1] ?? ""];
+  for (const side of [0, 1] as const) {
+    if (f.playerSide && (f.playerSide === "white" ? 0 : 1) !== side) continue;
+    if (!names[side].includes(q)) continue;
+    if (opp && !names[1 - side].includes(opp)) continue;
+    if (f.outcome) {
+      const mine = side === 0 ? "1-0" : "0-1";
+      const theirs = side === 0 ? "0-1" : "1-0";
+      const wanted = f.outcome === "win" ? mine : f.outcome === "loss" ? theirs : "1/2-1/2";
+      if (game.result !== wanted) continue;
+    }
+    return true;
   }
+  return false;
+}
+
+function matches(game: GameRecord, f: GameFilters, text: string) {
+  if (f.player && !matchesPlayer(game, f)) return false;
   if (f.family && game.family !== f.family) return false;
   if (f.eco && !game.eco.startsWith(f.eco.toUpperCase())) return false;
+  if (f.ecoIn && !f.ecoIn.includes(game.eco.toUpperCase())) return false;
   if (f.kind && f.kind !== "all" && !game.cat.includes(f.kind)) return false;
   if (f.result && f.result !== "all" && game.result !== f.result) return false;
   if (f.minElo && game.maxElo < f.minElo) return false;

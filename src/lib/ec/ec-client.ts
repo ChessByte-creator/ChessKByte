@@ -1,5 +1,5 @@
 import type { Ply } from "@/lib/game";
-import type { EcFilter, EcInfo, EcRow, NotEc } from "./ec-engine";
+import type { EcFilter, EcInfo, EcRow, NotEc, PlayerHit } from "./ec-engine";
 import type { EcRequest } from "./ec-worker";
 
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void };
@@ -49,6 +49,14 @@ export class EcClient {
 
   pageByPlayerIndex(filter: EcFilter, afterId: number, limit: number) {
     return this.call<EcRow[]>({ type: "pageByPlayerIndex", filter, afterId, limit });
+  }
+
+  suggest(text: string, limit = 8) {
+    return this.call<PlayerHit[]>({ type: "suggest", text, limit });
+  }
+
+  count(ids: number[], side?: "white" | "black") {
+    return this.call<number | null>({ type: "count", ids, side });
   }
 
   game(rowId: number, maxPlies?: number) {

@@ -3,7 +3,7 @@ import type { Ply } from "@/lib/game";
 import type { GameSource } from "@/lib/importers/game-source";
 import { filterOpenings, kindOf, matchOpening, type Opening, type OpeningsIndex } from "@/lib/openings";
 import { EcClient } from "./ec-client";
-import type { EcFilter, EcInfo, EcRow } from "./ec-engine";
+import { canUsePlayerIndex, type EcFilter, type EcInfo, type EcRow, type PlayerHit } from "./ec-engine";
 
 /** Cada consulta deve levar cerca de meio segundo: assim o progresso anda e o "Parar" responde rápido. */
 const TARGET_MS = 450;
@@ -115,6 +115,18 @@ export class EcSource implements GameSource {
     return this.info.indexed.includes("whiteid") && this.info.indexed.includes("blackid");
   }
 
+  /** Jogadores do banco cujo nome começa (ou contém) o texto, para a lista de sugestões. */
+  suggestPlayers(text: string): Promise<PlayerHit[]> {
+    return this.client.suggest(text, 8);
+  }
+
+  /** Total de partidas do jogador (null quando o arquivo não tem índice: contar varreria tudo). */
+  async playerCount(filters: GameFilters): Promise<number | null> {
+    const ids = filters.playerId != null ? [filters.playerId] : filters.player ? await this.client.ids("players", filters.player) : [];
+    if (ids.length === 0) return 0;
+    return this.client.count(ids, filters.playerSide);
+  }
+
   close() {
     this.client.close();
     this.done = true;
@@ -131,7 +143,23 @@ export class EcSource implements GameSource {
     const key = JSON.stringify(filters);
     if (this.cachedFilter && key === this.cachedKey) return this.cachedFilter;
     const out: EcFilter = {};
-    if (filters.player) out.playerIds = await this.client.ids("players", filters.player);
+    if (filters.playerId != null) out.playerIds = [filters.playerId];
+    else if (filters.player) out.playerIds = await this.client.ids("players", filters.player);
+    if (out.playerIds) {
+      if (filters.playerSide) out.side = filters.playerSide;
+      if (filters.opponentId != null) out.opponentIds = [filters.opponentId];
+      else if (filters.opponent) out.opponentIds = await this.client.ids("players", filters.opponent);
+      if (filters.outcome) {
+        const raws = (result: GameResult) => this.info.resultSample.filter((raw) => mapEcResult(raw) === result);
+        out.outcome =
+          filters.outcome === "win"
+            ? { white: raws("1-0"), black: raws("0-1") }
+            : filters.outcome === "loss"
+              ? { white: raws("0-1"), black: raws("1-0") }
+              : { white: raws("1/2-1/2"), black: raws("1/2-1/2") };
+      }
+    }
+    if (filters.ecoIn) out.ecoIn = filters.ecoIn;
     if (filters.text) {
       const text = filters.text.trim();
       if (/^[a-e]\d{0,2}$/i.test(text)) {
@@ -210,7 +238,7 @@ export class EcSource implements GameSource {
     };
 
     // Caminho rápido: jogador com índice no arquivo. Uma consulta devolve a página inteira.
-    if (this.client && filter.playerIds && this.playerIndexed && filter.playerIds.length > 0 && filter.playerIds.length <= 12) {
+    if (canUsePlayerIndex(filter, this.info.indexed)) {
       if (!this.done && !signal?.aborted) {
         const rows = await this.client.pageByPlayerIndex(filter, this.cursor, count);
         const records = rows.map((row) => this.toRecord(row));

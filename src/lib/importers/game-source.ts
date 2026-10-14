@@ -5,6 +5,8 @@ import { GameStream } from "@/lib/importers/game-stream";
 import { sniffFormat } from "@/lib/importers/sources";
 import type { OpeningsIndex } from "@/lib/openings";
 
+export type PlayerSuggestion = { id: number; name: string; elo: number };
+
 /** Qualquer arquivo de partidas lido sob demanda (PGN comprimido, .db genérico ou banco do En Croissant). */
 export interface GameSource {
   scanned: number;
@@ -21,6 +23,10 @@ export interface GameSource {
   ): Promise<GameRecord[]>;
   /** Nome do tipo de filtro que usa índice no arquivo, se houver (só para avisar o jogador). */
   readonly playerIndexed?: boolean;
+  /** Sugestões de jogadores pelo nome (só o banco do En Croissant tem a lista de jogadores). */
+  suggestPlayers?(text: string): Promise<PlayerSuggestion[]>;
+  /** Total de partidas do jogador, quando dá para saber sem varrer o arquivo. */
+  playerCount?(filters: GameFilters): Promise<number | null>;
   restart(): void;
   close(): void;
   /** Só nas fontes que guardam os lances em formato binário (En Croissant): decodifica ao abrir a partida. */

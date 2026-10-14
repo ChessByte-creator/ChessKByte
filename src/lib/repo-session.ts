@@ -1,14 +1,17 @@
 import type { GameFilters, GameRecord, GameResult } from "@/lib/games-db";
 import type { GameSource } from "@/lib/importers/game-source";
 import type { OpeningKind } from "@/lib/openings";
+import type { Token } from "@/lib/search-tokens";
 
 /**
  * Estado do repositório que sobrevive à troca de tela: o arquivo aberto, a página em que o jogador estava e
  * os filtros. Vive no módulo (não no componente), então sair e voltar não fecha nem relê o arquivo.
  */
 export type RepoDraft = {
-  player: string;
-  text: string;
+  tokens: Token[];
+  appliedTokens: Token[];
+  side: "any" | "white" | "black";
+  outcome: "all" | "win" | "draw" | "loss";
   kind: OpeningKind | "gambit" | "all";
   result: GameResult | "all";
   family: string;

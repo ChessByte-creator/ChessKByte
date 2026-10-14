@@ -38,9 +38,19 @@ export type EcRow = {
   timeControl: string;
 };
 
+export type PlayerHit = { id: number; name: string; elo: number };
+
 export type EcFilter = {
   /** IDs da tabela Players (já resolvidos pelo nome). Lista vazia = nenhuma partida. */
   playerIds?: number[];
+  /** Só partidas em que o jogador teve esta cor. */
+  side?: "white" | "black";
+  /** Adversário (IDs de Players): confronto direto com o jogador. */
+  opponentIds?: number[];
+  /** Resultado do ponto de vista do jogador: valores brutos de Result que contam, para cada cor dele. */
+  outcome?: { white: Array<string | number>; black: Array<string | number> };
+  /** Restrição por lista de códigos ECO (aberturas escolhidas). */
+  ecoIn?: string[];
   /** Texto livre: partidas cujo ECO está em textEco OU cujo evento está em textEvents. */
   textEco?: string[];
   textEvents?: number[];
@@ -96,13 +106,26 @@ function ecos(values: string[] | undefined) {
     .join(",");
 }
 
+/** Dá para achar as partidas do jogador pelos índices de WhiteID/BlackID (sem varrer a tabela)? */
+export function canUsePlayerIndex(filter: EcFilter, indexed: string[]) {
+  const ids = filter.playerIds;
+  if (!ids || ids.length === 0 || ids.length > 12) return false;
+  const needWhite = filter.side !== "black";
+  const needBlack = filter.side !== "white";
+  return (!needWhite || indexed.includes("whiteid")) && (!needBlack || indexed.includes("blackid"));
+}
+
+function lit(value: string | number) {
+  return typeof value === "number" ? String(Number.isFinite(value) ? value : 0) : `'${value.replace(/'/g, "''")}'`;
+}
+
 export class EcDatabase {
   private constructor(
     private readonly sqlite3: Sqlite3Api,
     private db: number,
     readonly info: EcInfo,
     private readonly g: Columns,
-    private readonly names: Record<"players" | "events" | "sites", { table: string; id: string; name: string } | null>,
+    private readonly names: Record<"players" | "events" | "sites", { table: string; id: string; name: string; elo?: string | null } | null>,
     private readonly gamesTable: string,
   ) {}
 
@@ -149,7 +172,7 @@ export class EcDatabase {
       const cols = await columnsOf(table);
       const id = pick(cols, ["id"]);
       const name = pick(cols, ["name"]);
-      return id && name ? { table, id, name } : null;
+      return id && name ? { table, id, name, elo: pick(cols, ["elo"]) } : null;
     };
     const names = { players: await nameTable("players"), events: await nameTable("events"), sites: await nameTable("sites") };
 
@@ -202,28 +225,56 @@ export class EcDatabase {
     return run(this.sqlite3, this.db, sql, params);
   }
 
-  /** IDs de jogadores/eventos pelo nome (busca por parte do nome, sem diferenciar maiúsculas). */
-  async ids(kind: "players" | "events", text: string, limit = 3000): Promise<number[]> {
-    const t = this.names[kind];
+  /**
+   * Jogadores pelo nome, já ordenados (nome igual primeiro, depois começo do nome, depois os mais curtos).
+   * Começo do nome usa o índice UNIQUE de Name (instantâneo mesmo com milhões de jogadores) e como o índice
+   * diferencia maiúsculas, tenta como digitado, Capitalizado, minúsculo e MAIÚSCULO. Se nada começa assim,
+   * procura a parte do nome em qualquer lugar (percorre a tabela de nomes, mais lento).
+   */
+  async suggestPlayers(text: string, limit = 8): Promise<PlayerHit[]> {
+    const t = this.names.players;
     const clean = text.trim().replace(/[%_]/g, "");
     if (!t || !clean) return [];
-    // 1) Começo do nome (usa o índice UNIQUE de Name: instantâneo mesmo com milhões de jogadores).
-    //    O índice diferencia maiúsculas, então tenta como digitado, Capitalizado, minúsculo e MAIÚSCULO.
+    const eloCol = t.elo ? `, ${q(t.elo)}` : ", NULL";
+    const hits = new Map<number, PlayerHit>();
+    const take = (rows: unknown[][]) => {
+      for (const row of rows) hits.set(Number(row[0]), { id: Number(row[0]), name: String(row[1] ?? ""), elo: Number(row[2]) || 0 });
+    };
     const variants = [...new Set([clean, clean[0].toUpperCase() + clean.slice(1), clean.toLowerCase(), clean.toUpperCase()])];
-    const found = new Set<number>();
     for (const variant of variants) {
-      const rows = await this.select(`SELECT ${q(t.id)} FROM ${q(t.table)} WHERE ${q(t.name)} >= ? AND ${q(t.name)} < ? LIMIT 200`, [variant, `${variant}\uffff`]);
-      for (const row of rows) found.add(Number(row[0]));
+      take(await this.select(`SELECT ${q(t.id)}, ${q(t.name)}${eloCol} FROM ${q(t.table)} WHERE ${q(t.name)} >= ? AND ${q(t.name)} < ? ORDER BY ${q(t.name)} LIMIT ${limit}`, [variant, `${variant}\uffff`]));
     }
-    if (found.size > 0) return [...found];
-    // 2) Parte do nome em qualquer lugar: percorre a tabela de nomes (mais lento, por isso só se o começo não achou nada).
+    if (hits.size === 0) take(await this.select(`SELECT ${q(t.id)}, ${q(t.name)}${eloCol} FROM ${q(t.table)} WHERE ${q(t.name)} LIKE ? LIMIT ${limit}`, [`%${clean}%`]));
+    const lower = clean.toLowerCase();
+    return [...hits.values()]
+      .sort((a, b) => Number(b.name.toLowerCase() === lower) - Number(a.name.toLowerCase() === lower) || a.name.length - b.name.length || a.name.localeCompare(b.name))
+      .slice(0, limit);
+  }
+
+  /** IDs de jogadores/eventos pelo nome (para os filtros por texto). */
+  async ids(kind: "players" | "events", text: string, limit = 3000): Promise<number[]> {
+    if (kind === "players") return (await this.suggestPlayers(text, 200)).map((hit) => hit.id);
+    const t = this.names.events;
+    const clean = text.trim().replace(/[%_]/g, "");
+    if (!t || !clean) return [];
     const rows = await this.select(`SELECT ${q(t.id)} FROM ${q(t.table)} WHERE ${q(t.name)} LIKE ? LIMIT ${limit}`, [`%${clean}%`]);
     return rows.map((row) => Number(row[0]));
   }
 
-  /** Verdadeiro se dá para achar as partidas desses jogadores pelo índice (sem varrer a tabela). */
-  canUsePlayerIndex(playerIds: number[] | undefined) {
-    return !!playerIds && playerIds.length > 0 && playerIds.length <= 12 && this.info.indexed.includes("whiteid") && this.info.indexed.includes("blackid");
+  /** Quantas partidas o jogador tem (só quando há índice: contar sem índice varreria o arquivo inteiro). */
+  async countPlayerGames(ids: number[], side?: "white" | "black"): Promise<number | null> {
+    const g = this.g;
+    const list = ints(ids);
+    if (!list) return 0;
+    const sides = side ? [side] : (["white", "black"] as const);
+    let total = 0;
+    for (const item of sides) {
+      const col = item === "white" ? g.whiteId : g.blackId;
+      if (!col || !this.info.indexed.includes(norm(col))) return null;
+      const rows = await this.select(`SELECT COUNT(*) FROM ${q(this.gamesTable)} WHERE ${q(col)} IN (${list})`);
+      total += Number(rows[0]?.[0] ?? 0);
+    }
+    return total;
   }
 
   /**
@@ -236,8 +287,10 @@ export class EcDatabase {
     const rest: EcFilter = { ...filter, playerIds: undefined };
     const lists: EcRow[][] = [];
     for (const id of ids) {
-      for (const side of [g.whiteId, g.blackId] as string[]) {
-        lists.push(await this.page(rest, afterId, this.info.maxId, limit, { column: side, id }));
+      for (const side of ["white", "black"] as const) {
+        if (filter.side && filter.side !== side) continue;
+        const column = (side === "white" ? g.whiteId : g.blackId) as string;
+        lists.push(await this.page(rest, afterId, this.info.maxId, limit, { column, id }));
       }
     }
     const merged = new Map<number, EcRow>();
@@ -250,15 +303,51 @@ export class EcDatabase {
     const g = this.g;
     const where: string[] = [`g.${q(g.id as string)} > ?`, `g.${q(g.id as string)} <= ?`];
     const params: unknown[] = [afterId, untilId];
+    // Condições do jogador, lado a lado: (jogador de brancas E adversário de pretas E resultado dele) OU (o inverso).
+    const branch = (side: "white" | "black", playerCond: string | null): string | null => {
+      const own = side === "white" ? g.whiteId : g.blackId;
+      const other = side === "white" ? g.blackId : g.whiteId;
+      const parts: string[] = [];
+      if (playerCond) parts.push(playerCond);
+      if (filter.opponentIds && other) {
+        const list = ints(filter.opponentIds);
+        if (!list) return null;
+        parts.push(`g.${q(other)} IN (${list})`);
+      }
+      if (filter.outcome && g.result) {
+        const raw = filter.outcome[side];
+        if (raw.length === 0) return null;
+        parts.push(`g.${q(g.result)} IN (${raw.map(lit).join(",")})`);
+      }
+      void own;
+      return parts.length > 0 ? `(${parts.join(" AND ")})` : "1";
+    };
     if (only) {
-      where.push(`g.${q(only.column)} = ?`);
-      params.push(only.id);
+      const side = only.column === g.whiteId ? "white" : "black";
+      const cond = branch(side, `g.${q(only.column)} = ${Math.trunc(only.id)}`);
+      if (!cond) return [];
+      where.push(cond);
     }
 
     if (filter.playerIds) {
       const list = ints(filter.playerIds);
       if (!list) return [];
-      where.push(`(g.${q(g.whiteId as string)} IN (${list}) OR g.${q(g.blackId as string)} IN (${list}))`);
+      const branches: string[] = [];
+      if (filter.side !== "black") {
+        const cond = branch("white", `g.${q(g.whiteId as string)} IN (${list})`);
+        if (cond) branches.push(cond);
+      }
+      if (filter.side !== "white") {
+        const cond = branch("black", `g.${q(g.blackId as string)} IN (${list})`);
+        if (cond) branches.push(cond);
+      }
+      if (branches.length === 0) return [];
+      where.push(`(${branches.join(" OR ")})`);
+    }
+    if (filter.ecoIn) {
+      const eco = ecos(filter.ecoIn);
+      if (!eco || !g.eco) return [];
+      where.push(`g.${q(g.eco)} IN (${eco})`);
     }
     if (filter.textEco || filter.textEvents) {
       const parts: string[] = [];

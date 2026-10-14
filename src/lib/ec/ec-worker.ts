@@ -14,6 +14,8 @@ export type EcRequest =
   | { id: number; type: "ids"; kind: "players" | "events"; text: string }
   | { id: number; type: "page"; filter: EcFilter; afterId: number; untilId: number; limit: number }
   | { id: number; type: "pageByPlayerIndex"; filter: EcFilter; afterId: number; limit: number }
+  | { id: number; type: "suggest"; text: string; limit: number }
+  | { id: number; type: "count"; ids: number[]; side?: "white" | "black" }
   | { id: number; type: "game"; rowId: number; maxPlies?: number }
   | { id: number; type: "close" };
 
@@ -50,6 +52,10 @@ async function handle(request: EcRequest): Promise<unknown> {
       return database ? database.page(request.filter, request.afterId, request.untilId, request.limit) : [];
     case "pageByPlayerIndex":
       return database ? database.pageByPlayerIndex(request.filter, request.afterId, request.limit) : [];
+    case "suggest":
+      return database ? database.suggestPlayers(request.text, request.limit) : [];
+    case "count":
+      return database ? database.countPlayerGames(request.ids, request.side) : null;
     case "game":
       return database ? database.loadGame(request.rowId, request.maxPlies) : null;
     case "close":
