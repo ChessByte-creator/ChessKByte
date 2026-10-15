@@ -34,7 +34,7 @@ import {
   type Ply,
 } from "@/lib/game";
 import { loadOpenings, matchOpening, KIND_LABEL, openingNamePt, type OpeningsIndex } from "@/lib/openings";
-import { isRecapture, judgePly, needsAfterSearch, type MoveReview, type ReviewState } from "@/lib/review";
+import { continuesLine, isRecapture, judgePly, needsAfterSearch, type MoveReview, type ReviewState } from "@/lib/review";
 import { loadAnalysis, saveAnalysis, type AnalysisRecord } from "@/lib/analysis-store";
 import { buildAnalysisJson, buildAnnotatedPgn, downloadText, parseAnalysisFile } from "@/lib/analysis-file";
 import { MAX_PREMOVES, applyPremoves, premoveTargets, resolvePremove, type Premove } from "@/lib/premove";
@@ -910,6 +910,10 @@ export function ChessApp() {
       // Cada posição é buscada UMA vez. A busca da posição k serve de "depois" do lance k e de "antes" do lance k+1,
       // como na Lichess: o lance é medido pela avaliação independente da posição que ele criou.
       let before: { fen: string; lines: EngineLine[]; bestmove: string } | null = null;
+      // Busca da posição anterior à anterior: mostra se o motor já "via" essa continuação duas jogadas antes.
+      let beforePrev: { fen: string; lines: EngineLine[]; bestmove: string } | null = null;
+      // Dentro de uma combinação que já rendeu um Brilhante/Ótimo, as continuações que o motor já previa não são achados novos.
+      let combo: boolean = false;
       for (let k = startAt - 1; k <= total; k += 1) {
         if (jobRef.current !== job) return;
         const fen = snapshot[k].fen;
@@ -940,7 +944,9 @@ export function ChessApp() {
           let bestUci = before.bestmove;
           let afterEval: WhiteEval = hereEval;
           let shallowBest: string | undefined;
-          const judge = () =>
+          const predicted = index >= 2 && continuesLine(beforePrev?.lines, snapshot[index - 1]?.uci, uci);
+          const inChain: boolean = combo && predicted;
+          const judge = (): MoveReview =>
             judgePly({
               beforeFen,
               uci,
@@ -954,8 +960,9 @@ export function ChessApp() {
               prevOpponentLoss: prevLoss,
               seed: index,
               shallowBest,
+              inChain,
             });
-          let result = judge();
+          let result: MoveReview = judge();
 
           // "Ótimo" e "Brilhante" são raros: confirma com uma busca bem mais funda, antes e depois do lance.
           if (result.judgment === "great" || result.judgment === "brilliant") {
@@ -974,8 +981,9 @@ export function ChessApp() {
               if (top) afterEval = toWhiteEval(top.scoreCp, top.mate, new Chess(ply.fen).turn());
             }
             result = judge();
-            // Brilhante tem que ser difícil de achar: se um motor raso já escolhe esse lance, é óbvio.
-            if (result.judgment === "brilliant") {
+            // Ótimo (e o brilhante sem sacrifício) tem que ser difícil de achar: se um motor raso já escolhe esse lance, é óbvio.
+            // O brilhante com sacrifício não passa por aqui: um motor raso costuma gostar de capturas, e isso não o torna óbvio.
+            if (result.judgment === "great" || (result.judgment === "brilliant" && !result.sacrifice)) {
               const shallow = await engine.search({ fen: beforeFen, depth: 4, movetime: 400, multipv: 1 });
               if (jobRef.current !== job || shallow.cancelled) return;
               shallowBest = shallow.bestmove;
@@ -985,12 +993,14 @@ export function ChessApp() {
 
           moves[index] = result;
           prevLoss = result.winLoss;
+          combo = result.judgment === "brilliant" || result.judgment === "great" || inChain;
           putReview({ key: gameKey, status: "running", progress: index, total, partial: false, moves: { ...moves } });
           // Ponto de retorno: se a aba fechar no meio, o que já foi avaliado fica guardado.
           if (index % 10 === 0 && index < total) {
             void saveAnalysis(analysisRecord(snapshot, { key: gameKey, status: "done", progress: index, total, partial: true, moves: { ...moves } }, shapesRef.current)).catch(() => undefined);
           }
         }
+        beforePrev = before;
         before = here;
       }
       if (jobRef.current !== job) return;
@@ -1513,7 +1523,7 @@ export function ChessApp() {
               ) : null}
               {activeReview ? <p className="mb-3 text-xs text-muted">A análise fica guardada neste aparelho enquanto o PGN e o FEN forem os mesmos.</p> : null}
               <p className="mb-3 text-sm text-muted">
-                Cada lance ganha uma categoria com cor e símbolo, como no Chess.com. A conta usa a chance de vitória, não só os peões. Brilhante exige sacrifício de verdade; Ótimo, um lance que decide e que as alternativas não igualam.
+                Cada lance ganha uma categoria com cor e símbolo, como no Chess.com. A conta usa a chance de vitória, não só os peões. Brilhante exige sacrifício de verdade (uma peça entregue de propósito, sem estar ganhando de lavada); Ótimo, um lance que decide e que as alternativas não igualam. Excelente, Bom, Imprecisão, Erro e Erro grave usam os mesmos degraus do Chess.com: perder até 2, 5, 10 e 20 pontos de chance de vitória.
               </p>
               {summary && activeReview && (activeReview.status === "done" || activeReview.progress > 0) ? (
                 <>

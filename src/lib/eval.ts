@@ -141,79 +141,108 @@ export function gameAccuracy(values: number[]) {
 }
 
 export type MoveClassInput = {
-  /** Win% perdido pelo jogador que moveu (0–100). */
+  /** Chance de vitória perdida por quem jogou, em pontos (0–100): o "expected points lost" do Chess.com. */
   winLoss: number;
-  /** Win% do jogador antes do lance, com o melhor lance do motor. */
+  /** Chance de vitória de quem joga antes do lance, com o melhor lance do motor. */
   winBefore: number;
-  /** Win% do jogador depois do lance jogado. */
+  /** Chance de vitória de quem jogou depois do lance jogado. */
   winAfter: number;
   playedBest: boolean;
   forced: boolean;
   /** Número de lances legais na posição. */
   legalCount: number;
-  /** Diferença de win% entre o melhor lance e a melhor alternativa. */
-  gap: number;
-  /** Lance ainda é teoria de abertura. */
-  book: boolean;
-  /** Sacrifício VOLUNTÁRIO: entregou material e existia alternativa que não perdia material. */
-  sacrifice: boolean;
-  /** Lance silencioso: sem captura, xeque ou promoção. */
-  quiet: boolean;
-  /** Um motor raso (profundidade 4) já acha esse lance: não é difícil de ver. */
-  obvious: boolean;
   /** Quase sem escolha: poucos lances legais, ou em xeque com poucas saídas. */
   nearlyForced: boolean;
   /** Simples recaptura da peça que acabou de capturar. */
   recapture: boolean;
-  /** Quanto o adversário perdeu de win% no lance anterior. */
+  /** Lance de teoria de abertura. */
+  book: boolean;
+  /** Chance do melhor lance menos a da melhor alternativa (só faz sentido se o lance jogado foi o melhor). */
+  gap: number;
+  /** Chance de vitória da melhor alternativa ao lance jogado (null se o motor só deu uma linha). */
+  secondWin: number | null;
+  /** Sacrifício VOLUNTÁRIO: o lance deixou uma peça (não peão) em prise, perda líquida de 2+ pontos, e ela não estava assim antes. */
+  sacrifice: boolean;
+  /** Existe um lance sem sacrifício que o motor considera praticamente igual (a menos de 1,5 ponto de chance de vitória). */
+  quietAltClose: boolean;
+  /** Lance silencioso: sem captura, xeque ou promoção, e sem entregar material. */
+  quiet: boolean;
+  /** Um motor raso (profundidade 4) já escolhe esse lance: não é difícil de ver. */
+  obvious: boolean;
+  /** O lance só pegou uma peça que estava de graça. */
+  freeCapture: boolean;
+  /** Continuação de uma combinação que o motor já tinha previsto e que já foi premiada: não é um achado novo. */
+  inChain: boolean;
+  /** Quanto o adversário perdeu de chance no lance anterior. */
   prevOpponentLoss: number;
   /** O melhor lance era mate forçado. */
   bestIsMate: boolean;
 };
 
-/** Limites calibrados para não inflar "Ótimo" e "Brilhante". */
-export const GREAT_GAP = 15;
-/** Quanto de chance de vitória o lance "melhor do motor" pode perder na checagem posterior e ainda ser "Melhor". */
+/**
+ * Limites de perda de chance de vitória (pontos esperados), os mesmos degraus do Chess.com:
+ * Excelente até 2, Bom até 5, Imprecisão até 10, Erro até 20, acima disso Erro grave.
+ */
+export const EXCELLENT_MAX = 2;
+export const GOOD_MAX = 5;
+export const INACCURACY_MAX = 10;
+export const MISTAKE_MAX = 20;
+/** Quanto o melhor lance pode perder na checagem posterior e ainda ser "Melhor". */
 export const BEST_TOLERANCE = 2;
-export const BRILLIANT_MAX_BEFORE = 80;
-export const BRILLIANT_MIN_AFTER = 50;
-/** Brilhante por sacrifício: as alternativas têm de ser claramente piores. */
-export const BRILLIANT_SAC_GAP = 10;
-/** Brilhante sem sacrifício: todas as alternativas perdem pelo menos isto em chance de vitória. */
-export const BRILLIANT_QUIET_GAP = 30;
-export const BRILLIANT_QUIET_MIN_BEFORE = 15;
+
+/** Ótimo: a melhor alternativa tem que ser pior por pelo menos isto. */
+export const GREAT_GAP = 12;
+/** ...ou por isto, mesmo sem mudar de faixa de avaliação. */
+export const GREAT_BIG_GAP = 25;
+/** Brilhante: ainda não pode estar ganhando de lavada antes, nem perdendo depois. */
+export const BRILLIANT_MAX_BEFORE = 88;
+export const BRILLIANT_MIN_AFTER = 45;
+export const BRILLIANT_MAX_LOSS = 2.5;
+
+/** Faixa de avaliação de quem joga: 3 ganhando, 2 melhor, 1 igual, 0 pior, -1 perdendo. */
+export function zone(win: number) {
+  if (win >= 75) return 3;
+  if (win >= 58) return 2;
+  if (win >= 42) return 1;
+  if (win >= 25) return 0;
+  return -1;
+}
 
 /**
- * Categorias por chance de vitória (pontos esperados), não por centipeões.
+ * Categorias por chance de vitória, no estilo do Chess.com:
  * - Livro: lance de teoria.
- * - Brilhante: sacrifício voluntário de peça (nunca só peão), quase ótimo, e as outras linhas pioram de verdade.
- * - Ótimo: lance crítico que decide o jogo; a melhor alternativa é bem pior.
+ * - Brilhante: bom lance (quase o melhor) que SACRIFICA uma peça de forma voluntária e não óbvia, sem estar
+ *   já ganhando de lavada e sem ficar perdendo. Um achado novo: continuação de uma combinação já premiada não conta.
+ *   Também vale o lance silencioso que sozinho transforma uma posição não ganha em ganha.
+ * - Ótimo: o melhor lance, quando a melhor alternativa é bem pior (cai de faixa de avaliação); ficam de fora
+ *   lances forçados, recapturas, peça de graça, mate e continuações de uma combinação.
  */
-export function classifyMove(input: MoveClassInput): Judgment {
-  const { winLoss, winBefore, winAfter, playedBest, forced, legalCount, gap, book, sacrifice, quiet, obvious, nearlyForced, recapture, prevOpponentLoss, bestIsMate } = input;
-  if (book) return "book";
+export function classifyMove(i: MoveClassInput): Judgment {
+  if (i.book) return "book";
 
-  const nearBest = playedBest || winLoss < 3;
-  const decided = winBefore >= 92 || winBefore <= 5;
+  const free = !i.forced && !i.nearlyForced && !i.recapture;
+  const nearBest = i.playedBest || i.winLoss < 1.5;
 
-  if (nearBest && !forced && !recapture) {
-    // Brilhante: difícil de achar (um motor raso não acha) e não obrigatório, por um de dois caminhos:
-    // 1) sacrifício voluntário de peça, com alternativas piores; 2) lance silencioso decisivo.
-    const hard = !obvious && !nearlyForced && !bestIsMate && winAfter >= BRILLIANT_MIN_AFTER && winBefore <= BRILLIANT_MAX_BEFORE;
-    if (hard && sacrifice && winLoss < 2.5 && gap >= BRILLIANT_SAC_GAP) return "brilliant";
-    if (hard && quiet && playedBest && gap >= BRILLIANT_QUIET_GAP && winBefore >= BRILLIANT_QUIET_MIN_BEFORE) return "brilliant";
-    if (playedBest && winLoss < BEST_TOLERANCE && legalCount > 2 && !decided && !bestIsMate && gap >= GREAT_GAP) return "great";
+  if (nearBest && free && !i.freeCapture) {
+    if (i.sacrifice && !i.inChain && i.winLoss < BRILLIANT_MAX_LOSS && i.winBefore <= BRILLIANT_MAX_BEFORE && i.winAfter >= BRILLIANT_MIN_AFTER && !i.quietAltClose) {
+      return "brilliant";
+    }
+    const hiddenWin = i.quiet && i.playedBest && !i.obvious && !i.inChain && !i.bestIsMate && i.gap >= 30 && i.winBefore <= 65 && i.winAfter >= 70;
+    if (hiddenWin) return "brilliant";
+
+    const critical = i.secondWin !== null && i.gap >= GREAT_GAP && (zone(i.winBefore) - zone(i.secondWin) >= 1 || i.gap >= GREAT_BIG_GAP);
+    if (i.playedBest && i.winLoss < 1.5 && critical && !i.obvious && !i.inChain && !i.bestIsMate && i.winBefore > 8 && i.winBefore < 90) return "great";
   }
 
   // "Melhor" exige que a avaliação medida depois do lance confirme: o motor raso pode escolher um lance que a busca seguinte desmente.
-  if ((playedBest && winLoss < BEST_TOLERANCE) || winLoss < 0.5) return "best";
-  if (winLoss < 5) return "excellent";
-  if (winLoss < 10) return "good";
+  if ((i.playedBest && i.winLoss < BEST_TOLERANCE) || i.winLoss < 0.5) return "best";
+  if (i.winLoss < EXCELLENT_MAX) return "excellent";
+  if (i.winLoss < GOOD_MAX) return "good";
+  if (i.winLoss < INACCURACY_MAX) return "inaccuracy";
 
   // Deixou passar a chance criada por um erro do adversário, mas ainda ficou bem.
-  if (prevOpponentLoss >= 10 && winAfter >= 35) return "miss";
-  if (winLoss < 15) return "inaccuracy";
-  if (winLoss < 25) return "mistake";
+  if (i.prevOpponentLoss >= 10 && i.winAfter >= 35) return "miss";
+  if (i.winLoss < MISTAKE_MAX) return "mistake";
   return "blunder";
 }
 

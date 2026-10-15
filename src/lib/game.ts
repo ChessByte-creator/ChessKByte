@@ -147,13 +147,35 @@ export function pliesFromText(text: string): Ply[] | null {
       /* try pgn */
     }
   }
-  const asPgn = new Chess();
-  try {
-    asPgn.loadPgn(trimmed);
-    return replay(asPgn, asPgn.getHeaders().FEN);
-  } catch {
-    return null;
+  // PGN colado de sites e livros costuma vir "sujo": ponto depois do resultado ("1-0."), comentários, variantes,
+  // símbolos $n, roque com zero (0-0). Tenta o texto como veio e depois versões cada vez mais limpas.
+  for (const candidate of pgnCandidates(trimmed)) {
+    const asPgn = new Chess();
+    try {
+      asPgn.loadPgn(candidate);
+      return replay(asPgn, asPgn.getHeaders().FEN);
+    } catch {
+      /* tenta a próxima versão */
+    }
   }
+  return null;
+}
+
+function pgnCandidates(text: string): string[] {
+  const out = [text];
+  // Só o ponto solto depois do resultado.
+  const noDot = text.replace(/(1-0|0-1|1\/2-1\/2|½-½|\*)\s*\.+\s*$/, "$1");
+  if (noDot !== text) out.push(noDot);
+  // Limpeza geral: comentários, variantes, NAGs, roque com zero, resultado com ½.
+  let clean = noDot.replace(/\{[^}]*\}/g, " ").replace(/;[^\n]*/g, " ");
+  for (let depth = 0; depth < 4; depth += 1) clean = clean.replace(/\([^()]*\)/g, " ");
+  clean = clean
+    .replace(/\$\d+/g, " ")
+    .replace(/(^|\s)0-0-0/g, "$1O-O-O")
+    .replace(/(^|\s)0-0(?![-\d])/g, "$1O-O")
+    .replace(/½-½/g, "1/2-1/2");
+  if (clean !== noDot) out.push(clean);
+  return out;
 }
 
 function replay(finalGame: Chess, startFen?: string): Ply[] {

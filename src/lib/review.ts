@@ -1,6 +1,8 @@
 import { Chess, type Square } from "chess.js";
 import type { EngineLine } from "@/lib/engine";
+import { isFreeCapture, newSacrifice, PIECE_VALUE } from "@/lib/tactics";
 import {
+  BRILLIANT_MAX_LOSS,
   classifyMove,
   cpToWinPercent,
   moveAccuracy,
@@ -35,22 +37,6 @@ export type ReviewState = {
   moves: Record<number, MoveReview>;
 };
 
-const PIECE_VALUE: Record<string, number> = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
-
-function material(chess: Chess, color: "w" | "b") {
-  let total = 0;
-  for (const row of chess.board()) {
-    for (const piece of row) {
-      if (piece && piece.color === color) total += PIECE_VALUE[piece.type] ?? 0;
-    }
-  }
-  return total;
-}
-
-function balance(chess: Chess, color: "w" | "b") {
-  return material(chess, color) - material(chess, color === "w" ? "b" : "w");
-}
-
 function playToken(chess: Chess, uci: string) {
   try {
     return chess.move({
@@ -63,78 +49,49 @@ function playToken(chess: Chess, uci: string) {
   }
 }
 
-export function firstMove(pv: string) {
-  return pv.trim().split(/\s+/)[0] ?? "";
+function materialOf(chess: Chess, color: "w" | "b") {
+  let total = 0;
+  for (const row of chess.board()) {
+    for (const piece of row) {
+      if (piece) total += (piece.color === color ? 1 : -1) * (PIECE_VALUE[piece.type] ?? 0);
+    }
+  }
+  return total;
 }
 
 /**
- * Saldo de material do jogador (dele menos do adversário) em relação ao início da linha, no pior ponto
- * "assentado": depois da resposta do adversário e sem troca em andamento. O próprio lance nunca reduz
- * o material de quem joga; é preciso olhar a continuação. Devolve null se a linha for curta demais.
+ * A peça entregue é recuperada logo em seguida, na própria linha do motor? Se o adversário captura a peça
+ * entregue (em `square`) e, em algum ponto assentado da linha (sem troca em andamento), o material volta a ser igual ou melhor
+ * que no início, é só uma tática que ganha material, não um sacrifício. Se o adversário não captura
+ * (peça envenenada) ou a linha segue com déficit, continua valendo como sacrifício.
  */
-export function settledMaterialDelta(beforeFen: string, pv: string, color: "w" | "b", horizon = 8): number | null {
+export function isTemporarySacrifice(beforeFen: string, pv: string, color: "w" | "b", square: string, horizon = 8): boolean {
   const tokens = pv.trim().split(/\s+/).filter((token) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(token));
-  if (tokens.length < 2) return null;
+  if (tokens.length < 3) return false;
   const chess = new Chess(beforeFen);
-  const base = balance(chess, color);
-  const captures: boolean[] = [];
-  const diffs: number[] = [];
+  const base = materialOf(chess, color);
   const limit = Math.min(tokens.length, horizon);
+  const captures: boolean[] = [];
+  const deltas: number[] = [];
+  let tookPiece = false;
   for (let i = 0; i < limit; i += 1) {
     const moved = playToken(chess, tokens[i]);
     if (!moved) break;
     captures.push(moved.isCapture() || Boolean(moved.promotion));
-    diffs.push(balance(chess, color) - base);
+    deltas.push(materialOf(chess, color) - base);
+    // O adversário tem que capturar justamente a peça entregue (trocas de outras peças não contam).
+    if (i % 2 === 1 && i <= 3 && moved.to === square && moved.captured && (PIECE_VALUE[moved.captured] ?? 0) >= 3) tookPiece = true;
   }
-  let worst: number | null = null;
-  for (let t = 2; t <= diffs.length; t += 2) {
+  if (!tookPiece) return false;
+  for (let t = 2; t <= deltas.length; t += 2) {
     if (t < captures.length && captures[t]) continue; // troca ainda em andamento
-    worst = worst === null ? diffs[t - 1] : Math.min(worst, diffs[t - 1]);
+    if (deltas[t - 1] >= 0) return true;
   }
-  return worst;
+  return false;
 }
 
-/** Peão não conta. Só cavalo, bispo, torre ou dama. */
-export const SACRIFICE_MIN_PIECE = 3;
-/** Perda líquida mínima, já descontada a compensação que a linha recupera. */
-export const SACRIFICE_MIN_NET = 2;
-
-/** Maior peça nossa que o adversário captura na linha. 0 se ele não captura nada. */
-export function maxOwnPieceCaptured(beforeFen: string, pv: string, color: "w" | "b", horizon = 8): number {
-  const tokens = pv.trim().split(/\s+/).filter((token) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(token));
-  if (tokens.length < 2) return 0;
-  const chess = new Chess(beforeFen);
-  let max = 0;
-  const limit = Math.min(tokens.length, horizon);
-  for (let i = 0; i < limit; i += 1) {
-    const moved = playToken(chess, tokens[i]);
-    if (!moved) break;
-    if (i % 2 === 1 && moved.captured) max = Math.max(max, PIECE_VALUE[moved.captured] ?? 0);
-  }
-  return max;
-}
-
-/** Perda de uma peça (não peão) de pelo menos 2 pontos líquidos na linha do motor. */
-export function detectSacrifice(beforeFen: string, pv: string, color: "w" | "b", horizon = 8): boolean {
-  if (maxOwnPieceCaptured(beforeFen, pv, color, horizon) < SACRIFICE_MIN_PIECE) return false;
-  const delta = settledMaterialDelta(beforeFen, pv, color, horizon);
-  return delta !== null && delta <= -SACRIFICE_MIN_NET;
-}
-
-/**
- * Sacrifício voluntário de peça: a linha entrega cavalo, bispo, torre ou dama,
- * fica pelo menos 2 pontos pior no material assentado, e alguma alternativa
- * do motor evita essa perda. Peão — mesmo dois — não conta. Se toda alternativa
- * também perde a peça, a entrega é forçada e não é sacrifício.
- */
-export function isVoluntarySacrifice(beforeFen: string, playedPv: string, otherPvs: string[], color: "w" | "b"): boolean {
-  if (maxOwnPieceCaptured(beforeFen, playedPv, color) < SACRIFICE_MIN_PIECE) return false;
-  const played = settledMaterialDelta(beforeFen, playedPv, color);
-  if (played === null || played > -SACRIFICE_MIN_NET) return false;
-  return otherPvs.some((pv) => {
-    const alt = settledMaterialDelta(beforeFen, pv, color);
-    return alt !== null && alt >= played + SACRIFICE_MIN_NET;
-  });
+export function firstMove(pv: string) {
+  return pv.trim().split(/\s+/)[0] ?? "";
 }
 
 export type JudgeInput = {
@@ -153,9 +110,28 @@ export type JudgeInput = {
   seed: number;
   /** Melhor lance de uma busca rasa (profundidade 4), quando já foi consultada. */
   shallowBest?: string;
+  /** Continuação de uma combinação já premiada que o motor tinha previsto (ver `continuesLine`). */
+  inChain?: boolean;
 };
 
+/**
+ * O lance é a continuação que o motor já tinha na linha principal duas jogadas antes?
+ * `prevLines` é a busca da posição ANTES do lance anterior (do adversário); a linha principal dela deve
+ * começar com o lance que o adversário jogou e continuar com o lance atual. Se sim, nada foi "descoberto" aqui:
+ * o motor já enxergava a sequência inteira.
+ */
+export function continuesLine(prevLines: EngineLine[] | undefined, prevUci: string | undefined, uci: string): boolean {
+  if (!prevLines || !prevUci) return false;
+  const top = prevLines.find((line) => line.multipv === 1) ?? prevLines[0];
+  if (!top) return false;
+  const tokens = top.pv.trim().split(/\s+/);
+  return tokens[0] === prevUci && tokens[1] === uci;
+}
+
 const ZERO: WhiteEval = { cp: 0, mate: null };
+
+/** Um lance sem sacrifício a esta distância (em pontos de chance de vitória) do melhor torna o sacrifício dispensável. */
+const QUIET_ALT_WINDOW = 1.5;
 
 /** Precisa buscar a posição depois do lance? (só quando ele não aparece nas linhas do motor). */
 export function needsAfterSearch(lines: EngineLine[], uci: string, bestUci: string) {
@@ -189,23 +165,33 @@ export function judgePly(input: JudgeInput): MoveReview {
   const winLoss = forced ? 0 : Math.max(0, winBefore - winAfter);
   const lossCp = forced ? 0 : Math.max(0, beforeMover - afterMover);
 
-  // Melhor alternativa ao lance jogado.
-  const alt = lines.find((line) => firstMove(line.pv) !== uci);
-  const altWin = alt ? cpToWinPercent(moverCp(toWhiteEval(alt.scoreCp, alt.mate, turn), color)) : winBefore;
-  const gap = alt ? Math.max(0, winBefore - altWin) : 0;
+  // Melhor alternativa ao lance jogado (outra primeira jogada nas linhas do motor).
+  const others = lines.filter((line) => firstMove(line.pv) !== uci).sort((a, b) => a.multipv - b.multipv);
+  const winOf = (line: EngineLine) => cpToWinPercent(moverCp(toWhiteEval(line.scoreCp, line.mate, turn), color));
+  const secondWin = others[0] ? winOf(others[0]) : null;
+  const gap = playedBest && secondWin !== null ? Math.max(0, winBefore - secondWin) : 0;
 
-  const pvForPlayed = playedLine?.pv ?? (uci === bestUci ? top?.pv : undefined) ?? "";
-  const otherPvs = lines.filter((line) => firstMove(line.pv) !== uci).map((line) => line.pv);
-  const sacrifice = !forced && !inBook && pvForPlayed ? isVoluntarySacrifice(beforeFen, pvForPlayed, otherPvs, color) : false;
-  const materialDelta = pvForPlayed ? settledMaterialDelta(beforeFen, pvForPlayed, color) : null;
-  const givesMaterial = materialDelta !== null && materialDelta < 0;
+  // Sacrifício voluntário: calculado pelas regras (peça deixada em prise, que não estava), não pela linha do motor.
+  // (só para lances que não perderam chance: o resto não pode ser brilhante e a conta não é barata)
+  const sacInfo = !forced && !inBook && winLoss < BRILLIANT_MAX_LOSS ? newSacrifice(beforeFen, uci) : null;
+  const playedPv = playedLine?.pv ?? (uci === bestUci ? top?.pv : undefined) ?? "";
+  const sacrifice = sacInfo !== null && !(playedPv && sacInfo !== null && isTemporarySacrifice(beforeFen, playedPv, color, sacInfo.square));
+  // Se existe um lance sem sacrifício que o motor acha quase tão bom, o sacrifício não era necessário.
+  const quietAltClose =
+    sacrifice &&
+    others.some((line) => {
+      if (winOf(line) < winBefore - QUIET_ALT_WINDOW) return false;
+      const move = firstMove(line.pv);
+      return move.length >= 4 && newSacrifice(beforeFen, move) === null;
+    });
+
   const bestIsMate = top?.mate != null && top.mate !== 0 && (turn === color ? top.mate > 0 : top.mate < 0);
-  const nearlyForced = legalCount <= 2 || (before.inCheck() && legalCount <= 3);
-  const trial = new Chess(beforeFen);
+  const nearlyForced = legalCount <= 2 || (before.inCheck() && legalCount <= 4);
   let quiet = false;
   try {
+    const trial = new Chess(beforeFen);
     const moved = trial.move({ from: uci.slice(0, 2) as Square, to: uci.slice(2, 4) as Square, promotion: uci.length > 4 ? (uci[4] as "q" | "r" | "b" | "n") : undefined });
-    quiet = !givesMaterial && !moved.isCapture() && !moved.promotion && !moved.san.includes("+") && !moved.san.includes("#");
+    quiet = !sacrifice && !moved.isCapture() && !moved.promotion && !moved.san.includes("+") && !moved.san.includes("#");
   } catch {
     quiet = false;
   }
@@ -218,13 +204,17 @@ export function judgePly(input: JudgeInput): MoveReview {
     playedBest,
     forced,
     legalCount,
-    gap,
-    book: inBook,
-    sacrifice,
-    quiet,
-    obvious,
     nearlyForced,
     recapture,
+    book: inBook,
+    gap,
+    secondWin,
+    sacrifice,
+    quietAltClose,
+    quiet,
+    obvious,
+    freeCapture: !forced && isFreeCapture(beforeFen, uci),
+    inChain: input.inChain ?? false,
     prevOpponentLoss,
     bestIsMate,
   });
