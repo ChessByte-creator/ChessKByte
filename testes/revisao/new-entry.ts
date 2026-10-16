@@ -1,2 +1,4 @@
-export { judgePly, isRecapture, continuesLine } from "/home/claude/proj/byte-chess/byte-chess/src/lib/review";
-export { toWhiteEval, JUDGMENT_META } from "/home/claude/proj/byte-chess/byte-chess/src/lib/eval";
+export { judgePly, isRecapture, continuesLine } from "@/lib/review";
+export { toWhiteEval, JUDGMENT_META } from "@/lib/eval";
+export { newSacrifice, hangingPieces, isFreeCapture } from "@/lib/tactics";
+export { isTemporarySacrifice } from "@/lib/review";

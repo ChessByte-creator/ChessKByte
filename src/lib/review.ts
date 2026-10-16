@@ -25,6 +25,8 @@ export type MoveReview = {
   evalAfter: WhiteEval;
   forced: boolean;
   sacrifice: boolean;
+  /** Entradas do classificador (para depuração e testes). */
+  trace?: import("@/lib/eval").MoveClassInput;
 };
 
 /** Estado da revisão de uma partida (guardado por chave: posição inicial + lances). */
@@ -112,6 +114,8 @@ export type JudgeInput = {
   shallowBest?: string;
   /** Continuação de uma combinação já premiada que o motor tinha previsto (ver `continuesLine`). */
   inChain?: boolean;
+  /** Devolve as entradas do classificador em `trace` (só para testes: não vai para a análise salva). */
+  trace?: boolean;
 };
 
 /**
@@ -175,7 +179,10 @@ export function judgePly(input: JudgeInput): MoveReview {
   // (só para lances que não perderam chance: o resto não pode ser brilhante e a conta não é barata)
   const sacInfo = !forced && !inBook && winLoss < BRILLIANT_MAX_LOSS ? newSacrifice(beforeFen, uci) : null;
   const playedPv = playedLine?.pv ?? (uci === bestUci ? top?.pv : undefined) ?? "";
-  const sacrifice = sacInfo !== null && !(playedPv && sacInfo !== null && isTemporarySacrifice(beforeFen, playedPv, color, sacInfo.square));
+  // Torre ou dama oferecida continua sendo sacrifício mesmo que a linha devolva material depois (combinação);
+  // só peça menor que volta na troca imediata é "tática que ganha material".
+  const bigOffer = sacInfo !== null && (PIECE_VALUE[sacInfo.piece] ?? 0) >= 5;
+  const sacrifice = sacInfo !== null && (bigOffer || !(playedPv && isTemporarySacrifice(beforeFen, playedPv, color, sacInfo.square)));
   // Se existe um lance sem sacrifício que o motor acha quase tão bom, o sacrifício não era necessário.
   const quietAltClose =
     sacrifice &&
@@ -188,16 +195,18 @@ export function judgePly(input: JudgeInput): MoveReview {
   const bestIsMate = top?.mate != null && top.mate !== 0 && (turn === color ? top.mate > 0 : top.mate < 0);
   const nearlyForced = legalCount <= 2 || (before.inCheck() && legalCount <= 4);
   let quiet = false;
+  let givesCheck = false;
   try {
     const trial = new Chess(beforeFen);
     const moved = trial.move({ from: uci.slice(0, 2) as Square, to: uci.slice(2, 4) as Square, promotion: uci.length > 4 ? (uci[4] as "q" | "r" | "b" | "n") : undefined });
+    givesCheck = moved.san.includes("+") || moved.san.includes("#");
     quiet = !sacrifice && !moved.isCapture() && !moved.promotion && !moved.san.includes("+") && !moved.san.includes("#");
   } catch {
     quiet = false;
   }
   const obvious = input.shallowBest !== undefined && input.shallowBest === uci;
 
-  const judgment = classifyMove({
+  const clsInput = {
     winLoss,
     winBefore,
     winAfter,
@@ -217,7 +226,10 @@ export function judgePly(input: JudgeInput): MoveReview {
     inChain: input.inChain ?? false,
     prevOpponentLoss,
     bestIsMate,
-  });
+    inCheck: before.inCheck(),
+    givesCheck,
+  };
+  const judgment = classifyMove(clsInput);
 
   const accuracy = forced || inBook ? 100 : moveAccuracy(winBefore, winAfter);
   return {
@@ -232,6 +244,7 @@ export function judgePly(input: JudgeInput): MoveReview {
     evalAfter,
     forced,
     sacrifice,
+    ...(input.trace ? { trace: clsInput } : {}),
   };
 }
 

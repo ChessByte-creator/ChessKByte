@@ -72,6 +72,13 @@ export function hangingPieces(fen: string, color: "w" | "b", minNet = 2): Hangin
   return out;
 }
 
+/** Perda líquida mínima para contar uma peça que NÃO é a que se moveu (defesa abandonada, peça descoberta). */
+const OTHER_MIN = 3;
+/** Perda líquida mínima para contar uma peça que JÁ estava em prise (continuação de combinação). */
+const INHERITED_MIN = 5;
+/** Idem, quando é a própria peça que muda de uma casa atacada para outra. */
+const INHERITED_MOVED_MIN = 3;
+
 export type SacrificeInfo = {
   piece: string;
   square: Square;
@@ -132,11 +139,17 @@ export function newSacrifice(beforeFen: string, uci: string): SacrificeInfo {
   for (const item of hangingPieces(after.fen(), color)) {
     // Perda líquida: o que o adversário ganha menos o que o próprio lance acabou de capturar.
     const net = item.loss - taken;
-    if (net < 2) continue;
     const movedPiece = item.square === to;
+    // A peça que o lance move vale a partir de 2 (troca de qualidade: torre por bispo). Uma peça que fica
+    // pendurada porque o lance tirou a defesa dela (como a dama que abandona o cavalo) só vale se for 3+.
+    if (net < (movedPiece ? 2 : OTHER_MIN)) continue;
     const inherited = alreadyHanging.has(item.square) || (movedPiece && alreadyHanging.has(from));
     if (inherited) {
-      if (movedPiece) continue;
+      // Peça que já estava em prise: o lance só "oferece" de novo se ela é grande (a continuação de uma
+      // combinação, como o Qc3 que deixa a torre pendurada) e se havia saída segura. Peça pequena herdada
+      // (um cavalo que continua pendurado) é problema da combinação, não um sacrifício novo.
+      // A própria peça que vai de uma casa atacada para outra também vale, se ela tinha para onde fugir.
+      if (net < (movedPiece ? INHERITED_MOVED_MIN : INHERITED_MIN)) continue;
       if (!hasSafeAlternative(beforeFen, uci, color, item.square)) continue;
     }
     if (!worst || net > worst.loss) worst = { piece: item.piece, square: item.square, loss: net };
