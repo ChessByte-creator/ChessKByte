@@ -27,7 +27,9 @@ import {
   pliesKey,
   pgnOf,
   playUci,
-  resultText,
+  historyAt,
+  outcomeOf,
+  terminalEvalAt,
   sanOfUci,
   startPlies,
   terminalEval,
@@ -39,6 +41,7 @@ import { loadAnalysis, saveAnalysis, type AnalysisRecord } from "@/lib/analysis-
 import { buildAnalysisJson, buildAnnotatedPgn, downloadText, parseAnalysisFile } from "@/lib/analysis-file";
 import { MAX_PREMOVES, applyPremoves, premoveTargets, resolvePremove, type Premove } from "@/lib/premove";
 import { SHAPE_COLORS, toggleShape, type Shape, type ShapeColor } from "@/lib/shapes";
+import { chooseWithRepetition, lineScore } from "@/lib/repetition";
 import { PERSONALITIES, personalityById, pickStyledMove, type PersonalityId } from "@/lib/style";
 import { PuzzleScreen } from "@/components/chess/PuzzleScreen";
 import { OpeningsScreen } from "@/components/chess/OpeningsScreen";
@@ -157,13 +160,13 @@ export function ChessApp() {
   const viewIndex = altFor != null ? altFor - 1 : cursor;
   const boardFen = plies[Math.max(0, viewIndex)]?.fen ?? plies[0].fen;
   const turn = new Chess(boardFen).turn();
-  const outcome = resultText(plies[plies.length - 1]?.fen ?? boardFen);
+  const outcome = outcomeOf(plies);
   const canMove =
     view === "match" &&
     atTip &&
     !reviewRunning &&
     enginePhase === "ready" &&
-    (mode === "analyze" || new Chess(plies[cursor].fen).turn() === player);
+    (mode === "analyze" || (!outcome && new Chess(plies[cursor].fen).turn() === player));
 
   const sideView = view === "puzzle" || view === "library" || view === "repo";
   const myTurn = new Chess(plies[cursor]?.fen ?? plies[0].fen).turn() === player;
@@ -175,7 +178,7 @@ export function ChessApp() {
   const openingNow = book ? book.names[Math.min(cursor, book.names.length - 1)] : null;
 
   const shownEval = useMemo(() => {
-    const terminal = terminalEval(boardFen);
+    const terminal = altFor == null ? terminalEvalAt(plies, cursor) : terminalEval(boardFen);
     if (terminal) return terminal;
     if (activeReview?.status === "done") {
       if (altFor && activeReview.moves[altFor]) return activeReview.moves[altFor].evalBefore;
@@ -183,7 +186,7 @@ export function ChessApp() {
       if (cursor === 0 && activeReview.moves[1]) return activeReview.moves[1].evalBefore;
     }
     return live;
-  }, [activeReview, altFor, boardFen, cursor, live]);
+  }, [activeReview, altFor, boardFen, cursor, live, plies]);
 
   const summary = useMemo(() => {
     if (!activeReview) return null;
@@ -409,7 +412,7 @@ export function ChessApp() {
     if (holdRef.current) return;
     const fen = plies[cursor]?.fen;
     if (!fen) return;
-    const terminal = terminalEval(fen);
+    const terminal = terminalEvalAt(plies, cursor);
     if (terminal) {
       setLive(terminal);
       setLines([]);
@@ -425,7 +428,7 @@ export function ChessApp() {
     const atLiveTip = cursor === plies.length - 1;
     const duelPlaying = view === "duel" && duelRun && atLiveTip;
     const humanEngine = view === "match" && mode === "play" && atLiveTip && chess.turn() !== player;
-    const engineToMove = duelPlaying || humanEngine;
+    const engineToMove = (duelPlaying || humanEngine) && !outcomeOf(plies);
     const seat = chess.turn() === "w" ? whiteBot : blackBot;
     let dead = false;
     setThinking(engineToMove);
@@ -433,9 +436,10 @@ export function ChessApp() {
     const styled = activeStyle !== "balanced";
     const level = duelPlaying ? seatSkill(seat) : skill;
     const budget = thinkBudget(level, { styled, pace: duelPlaying ? duelPace : null });
+    const history = historyAt(plies, cursor);
     const request = engineToMove
-      ? { fen, ...budget }
-      : { fen, depth: 14, movetime: 1400, multipv: 3 };
+      ? { fen, history, ...budget }
+      : { fen, history, depth: 14, movetime: 1400, multipv: 3 };
 
     void engine
       .search(request, (update) => {
@@ -466,6 +470,18 @@ export function ChessApp() {
           skill: duelPlaying ? seatSkill(seat) : skill,
           depth: result.depth,
         });
+        // Repetição: ganhando, não aceita o empate; perdendo, procura (o motor já recebe o histórico da partida).
+        const topLine = result.lines.find((line) => line.multipv === 1) ?? result.lines[0];
+        const rep = chooseWithRepetition({
+          plies: pliesRef.current,
+          chosen: choice.uci,
+          botCp: topLine ? lineScore(topLine.scoreCp, topLine.mate) : 0,
+          candidates: result.lines.map((line) => ({ uci: line.pv.trim().split(/\s+/)[0] ?? "", score: lineScore(line.scoreCp, line.mate) })),
+        });
+        if (rep.changed) {
+          choice.uci = rep.uci;
+          choice.note = rep.kind === "seek" ? "Posição perdida: buscou a repetição para empatar." : "Evitou a repetição: está melhor e quer ganhar.";
+        }
         const played = playUci(fen, choice.uci);
         if (!played) return;
         const sideName = chess.turn() === "w" ? "Brancas" : "Pretas";
@@ -493,7 +509,7 @@ export function ChessApp() {
     if (view !== "duel") return;
     const last = plies[plies.length - 1]?.fen;
     if (!last || cursor !== plies.length - 1) return;
-    const result = resultText(last);
+    const result = outcomeOf(plies);
     if (!result) return;
     const id = pliesKey(plies);
     if (scoredRef.current === id) return;
@@ -554,7 +570,7 @@ export function ChessApp() {
       return;
     }
     const last = plies[plies.length - 1];
-    if (resultText(last.fen)) {
+    if (outcomeOf(plies)) {
       setPremoves([]);
       return;
     }
@@ -917,7 +933,7 @@ export function ChessApp() {
       for (let k = startAt - 1; k <= total; k += 1) {
         if (jobRef.current !== job) return;
         const fen = snapshot[k].fen;
-        const terminal = terminalEval(fen);
+        const terminal = terminalEvalAt(snapshot, k);
         const bookHere = (bookMatch?.inBook[k] ?? false) && (k + 1 > total || (bookMatch?.inBook[k + 1] ?? false));
         let here: { fen: string; lines: EngineLine[]; bestmove: string } | null = null;
         let hereEval: WhiteEval;
@@ -925,7 +941,7 @@ export function ChessApp() {
           hereEval = terminal;
         } else {
           const budget = bookHere ? { depth: 10, movetime: 500, multipv: 1 } : { depth: power.depth, movetime: power.movetime, multipv: 3 };
-          const searched = await engine.search({ fen, ...budget });
+          const searched = await engine.search({ fen, history: historyAt(snapshot, k), ...budget });
           if (jobRef.current !== job || searched.cancelled) return;
           here = { fen, lines: searched.lines, bestmove: searched.bestmove };
           const top = searched.lines.find((line) => line.multipv === 1) ?? searched.lines[0];
@@ -967,15 +983,15 @@ export function ChessApp() {
           // "Ótimo" e "Brilhante" são raros: confirma com uma busca bem mais funda, antes e depois do lance.
           if (result.judgment === "great" || result.judgment === "brilliant") {
             const deepBudget = { depth: power.depth + 4, movetime: Math.round(power.movetime * 1.6) };
-            const deep = await engine.search({ fen: beforeFen, ...deepBudget, multipv: 3 });
+            const deep = await engine.search({ fen: beforeFen, history: historyAt(snapshot, index - 1), ...deepBudget, multipv: 3 });
             if (jobRef.current !== job || deep.cancelled) return;
             lines = deep.lines;
             bestUci = deep.bestmove;
-            const terminalAfter = terminalEval(ply.fen);
+            const terminalAfter = terminalEvalAt(snapshot, index);
             if (terminalAfter) {
               afterEval = terminalAfter;
             } else {
-              const deepAfter = await engine.search({ fen: ply.fen, ...deepBudget, multipv: 1 });
+              const deepAfter = await engine.search({ fen: ply.fen, history: historyAt(snapshot, index), ...deepBudget, multipv: 1 });
               if (jobRef.current !== job || deepAfter.cancelled) return;
               const top = deepAfter.lines.find((line) => line.multipv === 1) ?? deepAfter.lines[0];
               if (top) afterEval = toWhiteEval(top.scoreCp, top.mate, new Chess(ply.fen).turn());
@@ -984,7 +1000,7 @@ export function ChessApp() {
             // Ótimo (e o brilhante sem sacrifício) tem que ser difícil de achar: se um motor raso já escolhe esse lance, é óbvio.
             // O brilhante com sacrifício não passa por aqui: um motor raso costuma gostar de capturas, e isso não o torna óbvio.
             if (result.judgment === "great" || (result.judgment === "brilliant" && !result.sacrifice)) {
-              const shallow = await engine.search({ fen: beforeFen, depth: 4, movetime: 400, multipv: 1 });
+              const shallow = await engine.search({ fen: beforeFen, history: historyAt(snapshot, index - 1), depth: 4, movetime: 400, multipv: 1 });
               if (jobRef.current !== job || shallow.cancelled) return;
               shallowBest = shallow.bestmove;
               result = judge();
