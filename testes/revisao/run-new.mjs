@@ -5,7 +5,7 @@ const [,, prefix = "kt", bookPlies = "10"] = process.argv;
 const d = JSON.parse(fs.readFileSync(`${prefix}-d16.json`, "utf8"));
 const shallow = JSON.parse(fs.readFileSync(`${prefix}-d4.json`, "utf8"));
 const FLAG = new Set(["brilliant", "great"]);
-let prevLoss = 0, combo = false; const out = [];
+let prevLoss = 0, combo = false, bookBroken = false; const out = [];
 for (let i = 1; i < d.positions.length; i++) {
   const before = d.positions[i - 1], after = d.positions[i], mv = d.moves[i - 1];
   const top = after.lines[0];
@@ -14,9 +14,9 @@ for (let i = 1; i < d.positions.length; i++) {
   const recapture = i >= 2 ? isRecapture(d.positions[i - 2].fen, d.moves[i - 2]?.uci, mv.uci) : false;
   const predicted = i >= 2 && continuesLine(d.positions[i - 2].lines, d.moves[i - 2]?.uci, mv.uci);
   const inChain = combo && predicted;
-  const r = judgePly({ beforeFen: before.fen, uci: mv.uci, color: mv.color, lines: before.lines, bestUci: before.lines[0].pv.split(" ")[0], bestSan: "", afterEval, inBook: i <= Number(bookPlies), recapture, prevOpponentLoss: prevLoss, seed: i, trace: true, shallowBest: shallow.positions[i - 1].lines[0].pv.split(" ")[0], inChain });
+  const r = judgePly({ beforeFen: before.fen, uci: mv.uci, color: mv.color, lines: before.lines, bestUci: before.lines[0].pv.split(" ")[0], bestSan: "", afterEval, inBook: i <= Number(bookPlies) && !bookBroken, recapture, prevOpponentLoss: prevLoss, seed: i, trace: true, shallowBest: shallow.positions[i - 1].lines[0].pv.split(" ")[0], inChain });
   combo = FLAG.has(r.judgment) || inChain;
-  prevLoss = r.winLoss; out.push({ i, san: mv.san, color: mv.color, j: r.judgment, loss: r.winLoss, sac: r.sacrifice, inChain, t: r.trace });
+  if (i <= Number(bookPlies) && !bookBroken && r.judgment !== "book") bookBroken = true; prevLoss = r.winLoss; out.push({ i, san: mv.san, color: mv.color, j: r.judgment, loss: r.winLoss, sac: r.sacrifice, inChain, t: r.trace });
 }
 const flagged = out.filter((o) => FLAG.has(o.j) || (o.sac && !o.inChain));
 if (process.argv[4]) console.log(out.filter((o) => o.i >= Number(process.argv[4]) && o.i <= Number(process.argv[5])).map((o) => `${Math.ceil(o.i / 2)}${o.color === "w" ? "." : "..."}${o.san}:${o.j}(${o.loss.toFixed(1)})`).join("  "));

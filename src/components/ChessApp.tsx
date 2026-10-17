@@ -937,11 +937,14 @@ export function ChessApp() {
       let beforePrev: { fen: string; lines: EngineLine[]; bestmove: string } | null = null;
       // Dentro de uma combinação que já rendeu um Brilhante/Ótimo, as continuações que o motor já previa não são achados novos.
       let combo: boolean = false;
+      // Livro só vale enquanto TODOS os lances anteriores foram livro: um lance ruim de teoria (8...Nxc3) encerra a abertura.
+      let bookBroken = false;
       for (let k = startAt - 1; k <= total; k += 1) {
         if (jobRef.current !== job) return;
         const fen = snapshot[k].fen;
         const terminal = terminalEvalAt(snapshot, k);
-        const bookHere = (bookMatch?.inBook[k] ?? false) && (k + 1 > total || (bookMatch?.inBook[k + 1] ?? false));
+        // Busca barata só nos primeiros lances: mais adiante um erro de "teoria" precisa ser medido com a busca normal.
+        const bookHere = !bookBroken && k <= 6 && (bookMatch?.inBook[k] ?? false) && (k + 1 > total || (bookMatch?.inBook[k + 1] ?? false));
         let here: { fen: string; lines: EngineLine[]; bestmove: string } | null = null;
         let hereEval: WhiteEval;
         if (terminal) {
@@ -961,7 +964,7 @@ export function ChessApp() {
           const uci = ply.uci;
           const color = ply.color;
           const beforeFen = before.fen;
-          const inBook = bookMatch?.inBook[index] ?? false;
+          const inBook = (bookMatch?.inBook[index] ?? false) && !bookBroken;
           const recapture = index >= 2 ? isRecapture(snapshot[index - 2].fen, snapshot[index - 1]?.uci, uci) : false;
           let lines = before.lines;
           let bestUci = before.bestmove;
@@ -1015,6 +1018,7 @@ export function ChessApp() {
           }
 
           moves[index] = result;
+          if (inBook && result.judgment !== "book") bookBroken = true;
           prevLoss = result.winLoss;
           combo = result.judgment === "brilliant" || result.judgment === "great" || inChain;
           putReview({ key: gameKey, status: "running", progress: index, total, partial: false, moves: { ...moves } });

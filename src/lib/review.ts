@@ -226,6 +226,7 @@ export function judgePly(input: JudgeInput): MoveReview {
     inChain: input.inChain ?? false,
     prevOpponentLoss,
     bestIsMate,
+    ply: input.seed ?? 99,
     inCheck: before.inCheck(),
     givesCheck,
   };

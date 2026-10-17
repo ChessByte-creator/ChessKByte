@@ -177,6 +177,8 @@ export type MoveClassInput = {
   prevOpponentLoss: number;
   /** O melhor lance era mate forçado. */
   bestIsMate: boolean;
+  /** Número do lance na partida (1 = primeiro lance das brancas). */
+  ply: number;
   /** Quem joga estava em xeque: responder ao xeque nunca é um achado brilhante. */
   inCheck: boolean;
   /** O lance dá xeque. */
@@ -191,6 +193,19 @@ export const EXCELLENT_MAX = 2;
 export const GOOD_MAX = 5;
 export const INACCURACY_MAX = 10;
 export const MISTAKE_MAX = 20;
+/** Lance de teoria que perde isto ou mais deixa de ser "livro" (o Chess.com marca imprecisão no 8...Nxc3 do Møller). */
+export const BOOK_MAX_LOSS = 5.5;
+/** Nos primeiros lances (teoria de linha principal, como o 2.f4 do Gambito do Rei) a tolerância é maior. */
+export const BOOK_EARLY_PLIES = 10;
+export const BOOK_EARLY_LOSS = 8;
+/** Perto do equilíbrio o Chess.com é mais rígido: a mesma perda de chance pesa mais. Fator até 1 + EQ_BOOST em 50%. */
+export const EQ_BOOST = 0.4;
+export const EQ_WIDTH = 20;
+export function equalityFactor(winBefore: number) {
+  return 1 + EQ_BOOST * Math.max(0, 1 - Math.abs(winBefore - 50) / EQ_WIDTH);
+}
+/** Erro do adversário (perda bruta) a partir do qual deixar de aproveitar vira "lance perdido". */
+export const MISS_PREV_MIN = 6;
 /** Quanto o melhor lance pode perder na checagem posterior e ainda ser "Melhor". */
 export const BEST_TOLERANCE = 2;
 
@@ -228,12 +243,14 @@ export function zone(win: number) {
  *   lances forçados, recapturas, peça de graça, mate e continuações de uma combinação.
  */
 export function classifyMove(i: MoveClassInput): Judgment {
-  if (i.book) return "book";
+  if (i.book && i.winLoss < (i.ply <= BOOK_EARLY_PLIES ? BOOK_EARLY_LOSS : BOOK_MAX_LOSS)) return "book";
 
   const free = !i.forced && !i.nearlyForced && !i.recapture;
   const nearBest = i.playedBest || i.winLoss < 1.5;
 
-  if (nearBest && free && !i.freeCapture) {
+  // Um sacrifício pode custar até BRILLIANT_MAX_LOSS e ainda ser o lance do achado (o Rb8+ do exemplo perde 1,6).
+  const nearBestForBrilliant = i.playedBest || i.winLoss < BRILLIANT_MAX_LOSS;
+  if (nearBestForBrilliant && free && !i.freeCapture) {
     // Brilhante: sacrifício voluntário, que não é resposta a xeque, que não perde chance e que não acontece
     // com a partida já decidida. Combinações seguidas podem ter vários brilhantes (o Chess.com também dá),
     // porque cada lance só conta se ele mesmo entrega material (ver `newSacrifice`).
@@ -262,13 +279,13 @@ export function classifyMove(i: MoveClassInput): Judgment {
 
   // "Melhor" exige que a avaliação medida depois do lance confirme: o motor raso pode escolher um lance que a busca seguinte desmente.
   if ((i.playedBest && i.winLoss < BEST_TOLERANCE) || i.winLoss < 0.5) return "best";
-  if (i.winLoss < EXCELLENT_MAX) return "excellent";
-  if (i.winLoss < GOOD_MAX) return "good";
-  if (i.winLoss < INACCURACY_MAX) return "inaccuracy";
-
-  // Deixou passar a chance criada por um erro do adversário, mas ainda ficou bem.
-  if (i.prevOpponentLoss >= 10 && i.winAfter >= 35) return "miss";
-  if (i.winLoss < MISTAKE_MAX) return "mistake";
+  const loss = i.winLoss * equalityFactor(i.winBefore);
+  if (loss < EXCELLENT_MAX) return "excellent";
+  if (loss < GOOD_MAX) return "good";
+  // Deixou passar a chance criada por um erro do adversário (mesmo que ainda fique bem ou que a perda seja grande).
+  if (i.prevOpponentLoss >= MISS_PREV_MIN && loss < 25) return "miss";
+  if (loss < INACCURACY_MAX) return "inaccuracy";
+  if (loss < MISTAKE_MAX) return "mistake";
   return "blunder";
 }
 
