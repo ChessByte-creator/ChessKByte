@@ -25,6 +25,13 @@ export type MoveReview = {
   evalAfter: WhiteEval;
   forced: boolean;
   sacrifice: boolean;
+  /** Profundidade que o motor realmente alcançou na posição antes e depois do lance (o tempo limite pode cortar a busca). */
+  /** Chance de vitória de quem jogou antes do lance (0–100). */
+  winBefore?: number;
+  depthBefore?: number;
+  depthAfter?: number;
+  /** A avaliação foi confirmada com uma busca mais funda (lance perto da divisa de categoria, ou ótimo/brilhante). */
+  confirmed?: boolean;
   /** Entradas do classificador (para depuração e testes). */
   trace?: import("@/lib/eval").MoveClassInput;
 };
@@ -245,6 +252,7 @@ export function judgePly(input: JudgeInput): MoveReview {
     evalAfter,
     forced,
     sacrifice,
+    winBefore,
     ...(input.trace ? { trace: clsInput } : {}),
   };
 }

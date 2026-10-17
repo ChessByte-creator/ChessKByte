@@ -204,6 +204,16 @@ export const EQ_WIDTH = 20;
 export function equalityFactor(winBefore: number) {
   return 1 + EQ_BOOST * Math.max(0, 1 - Math.abs(winBefore - 50) / EQ_WIDTH);
 }
+/**
+ * O lance caiu perto da divisa entre duas categorias (excelente/bom/imprecisão/erro/erro grave)? Então vale
+ * confirmar com uma busca mais funda antes de decidir: é onde a profundidade rasa mais erra o rótulo.
+ */
+export function nearCategoryEdge(winLoss: number, winBefore: number) {
+  if (winLoss < 0.8) return false;
+  const scaled = winLoss * equalityFactor(winBefore);
+  return [EXCELLENT_MAX, GOOD_MAX, INACCURACY_MAX, MISTAKE_MAX].some((edge) => Math.abs(scaled - edge) <= Math.max(0.8, edge * 0.25));
+}
+
 /** Erro do adversário (perda bruta) a partir do qual deixar de aproveitar vira "lance perdido". */
 export const MISS_PREV_MIN = 6;
 /** Quanto o melhor lance pode perder na checagem posterior e ainda ser "Melhor". */

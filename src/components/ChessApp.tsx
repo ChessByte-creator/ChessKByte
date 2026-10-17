@@ -17,6 +17,7 @@ import {
   type Judgment,
   type JudgmentCounts,
   type WhiteEval,
+  nearCategoryEdge,
 } from "@/lib/eval";
 import {
   appendMove,
@@ -932,9 +933,9 @@ export function ChessApp() {
       let prevLoss = moves[startAt - 1]?.winLoss ?? 0;
       // Cada posição é buscada UMA vez. A busca da posição k serve de "depois" do lance k e de "antes" do lance k+1,
       // como na Lichess: o lance é medido pela avaliação independente da posição que ele criou.
-      let before: { fen: string; lines: EngineLine[]; bestmove: string } | null = null;
+      let before: { fen: string; lines: EngineLine[]; bestmove: string; depth: number } | null = null;
       // Busca da posição anterior à anterior: mostra se o motor já "via" essa continuação duas jogadas antes.
-      let beforePrev: { fen: string; lines: EngineLine[]; bestmove: string } | null = null;
+      let beforePrev: { fen: string; lines: EngineLine[]; bestmove: string; depth: number } | null = null;
       // Dentro de uma combinação que já rendeu um Brilhante/Ótimo, as continuações que o motor já previa não são achados novos.
       let combo: boolean = false;
       // Livro só vale enquanto TODOS os lances anteriores foram livro: um lance ruim de teoria (8...Nxc3) encerra a abertura.
@@ -945,7 +946,7 @@ export function ChessApp() {
         const terminal = terminalEvalAt(snapshot, k);
         // Busca barata só nos primeiros lances: mais adiante um erro de "teoria" precisa ser medido com a busca normal.
         const bookHere = !bookBroken && k <= 6 && (bookMatch?.inBook[k] ?? false) && (k + 1 > total || (bookMatch?.inBook[k + 1] ?? false));
-        let here: { fen: string; lines: EngineLine[]; bestmove: string } | null = null;
+        let here: { fen: string; lines: EngineLine[]; bestmove: string; depth: number } | null = null;
         let hereEval: WhiteEval;
         if (terminal) {
           hereEval = terminal;
@@ -953,7 +954,7 @@ export function ChessApp() {
           const budget = bookHere ? { depth: 10, movetime: 500, multipv: 1 } : { depth: power.depth, movetime: power.movetime, multipv: 3 };
           const searched = await engine.search({ fen, history: historyAt(snapshot, k), ...budget });
           if (jobRef.current !== job || searched.cancelled) return;
-          here = { fen, lines: searched.lines, bestmove: searched.bestmove };
+          here = { fen, lines: searched.lines, bestmove: searched.bestmove, depth: searched.depth };
           const top = searched.lines.find((line) => line.multipv === 1) ?? searched.lines[0];
           hereEval = top ? toWhiteEval(top.scoreCp, top.mate, new Chess(fen).turn()) : ZERO;
         }
@@ -972,8 +973,11 @@ export function ChessApp() {
           let shallowBest: string | undefined;
           const predicted = index >= 2 && continuesLine(beforePrev?.lines, snapshot[index - 1]?.uci, uci);
           const inChain: boolean = combo && predicted;
-          const judge = (): MoveReview =>
-            judgePly({
+          let depthBefore = before.depth;
+          let depthAfter = here?.depth ?? 0;
+          let confirmed = false;
+          const judge = (): MoveReview => ({
+            ...judgePly({
               beforeFen,
               uci,
               color,
@@ -987,34 +991,53 @@ export function ChessApp() {
               seed: index,
               shallowBest,
               inChain,
-            });
+            }),
+            depthBefore,
+            depthAfter,
+            confirmed,
+          });
           let result: MoveReview = judge();
 
-          // "Ótimo" e "Brilhante" são raros: confirma com uma busca bem mais funda, antes e depois do lance.
-          if (result.judgment === "great" || result.judgment === "brilliant") {
+          // Confirma com uma busca bem mais funda, antes e depois do lance. Devolve false se a revisão foi cancelada.
+          const deepen = async (): Promise<boolean> => {
             const deepBudget = { depth: power.depth + 4, movetime: Math.round(power.movetime * 1.6) };
             const deep = await engine.search({ fen: beforeFen, history: historyAt(snapshot, index - 1), ...deepBudget, multipv: 3 });
-            if (jobRef.current !== job || deep.cancelled) return;
+            if (jobRef.current !== job || deep.cancelled) return false;
             lines = deep.lines;
             bestUci = deep.bestmove;
+            depthBefore = deep.depth;
             const terminalAfter = terminalEvalAt(snapshot, index);
             if (terminalAfter) {
               afterEval = terminalAfter;
             } else {
               const deepAfter = await engine.search({ fen: ply.fen, history: historyAt(snapshot, index), ...deepBudget, multipv: 1 });
-              if (jobRef.current !== job || deepAfter.cancelled) return;
+              if (jobRef.current !== job || deepAfter.cancelled) return false;
               const top = deepAfter.lines.find((line) => line.multipv === 1) ?? deepAfter.lines[0];
               if (top) afterEval = toWhiteEval(top.scoreCp, top.mate, new Chess(ply.fen).turn());
+              depthAfter = deepAfter.depth;
             }
-            result = judge();
-            // Ótimo (e o brilhante sem sacrifício) tem que ser difícil de achar: se um motor raso já escolhe esse lance, é óbvio.
-            // O brilhante com sacrifício não passa por aqui: um motor raso costuma gostar de capturas, e isso não o torna óbvio.
+            confirmed = true;
+            return true;
+          };
+          // Ótimo (e o brilhante sem sacrifício) tem que ser difícil de achar: se um motor raso já escolhe esse lance, é óbvio.
+          // O brilhante com sacrifício não passa por aqui: um motor raso costuma gostar de capturas, e isso não o torna óbvio.
+          const checkObvious = async (): Promise<boolean> => {
             if (result.judgment === "great" || (result.judgment === "brilliant" && !result.sacrifice)) {
               const shallow = await engine.search({ fen: beforeFen, history: historyAt(snapshot, index - 1), depth: 4, movetime: 400, multipv: 1 });
-              if (jobRef.current !== job || shallow.cancelled) return;
+              if (jobRef.current !== job || shallow.cancelled) return false;
               shallowBest = shallow.bestmove;
               result = judge();
             }
+            return true;
+          };
+
+          // "Ótimo" e "Brilhante" são raros; e um lance perto da divisa de categoria (bom/imprecisão/erro...) é onde a
+          // profundidade rasa mais erra o rótulo: nos dois casos a avaliação é refeita mais fundo antes de decidir.
+          const mateOrBook = result.judgment === "book" || afterEval.mate !== null || terminalEvalAt(snapshot, index) !== null;
+          if (result.judgment === "great" || result.judgment === "brilliant" || (!mateOrBook && nearCategoryEdge(result.winLoss, result.winBefore ?? 50))) {
+            if (!(await deepen())) return;
+            result = judge();
+            if (!(await checkObvious())) return;
           }
 
           moves[index] = result;
