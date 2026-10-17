@@ -42,7 +42,8 @@ import { buildAnalysisJson, buildAnnotatedPgn, downloadText, parseAnalysisFile }
 import { MAX_PREMOVES, applyPremoves, premoveTargets, resolvePremove, type Premove } from "@/lib/premove";
 import { SHAPE_COLORS, toggleShape, type Shape, type ShapeColor } from "@/lib/shapes";
 import { chooseWithRepetition, lineScore } from "@/lib/repetition";
-import { PERSONALITIES, personalityById, pickStyledMove, type PersonalityId } from "@/lib/style";
+import { PERSONALITIES, personalityById, pickStyledMove, styleScore, type PersonalityId } from "@/lib/style";
+import { MAX_RATING, pickByRating, ratingOfSkill, strengthBudget } from "@/lib/strength";
 import { PuzzleScreen } from "@/components/chess/PuzzleScreen";
 import { OpeningsScreen } from "@/components/chess/OpeningsScreen";
 import { GameInfoCard } from "@/components/chess/GameInfoCard";
@@ -435,7 +436,10 @@ export function ChessApp() {
     const activeStyle = engineToMove && duelPlaying ? seat.styleId : styleId;
     const styled = activeStyle !== "balanced";
     const level = duelPlaying ? seatSkill(seat) : skill;
-    const budget = thinkBudget(level, { styled, pace: duelPlaying ? duelPace : null });
+    // Abaixo da força plena o motor calcula raso e com várias linhas; a escolha entre elas é feita por rating (strength.ts).
+    const rating = duelPlaying ? seat.rating : ratingOfSkill(skill);
+    const weak = engineToMove && rating < MAX_RATING;
+    const budget = weak ? strengthBudget(rating, { pace: duelPlaying ? duelPace : null }) : thinkBudget(level, { styled, pace: duelPlaying ? duelPace : null });
     const history = historyAt(plies, cursor);
     const request = engineToMove
       ? { fen, history, ...budget }
@@ -462,14 +466,17 @@ export function ChessApp() {
         }
         if (cursorRef.current !== pliesRef.current.length - 1) return;
         if (pliesRef.current[pliesRef.current.length - 1]?.fen !== fen) return;
-        const choice = pickStyledMove({
-          fen,
-          lines: result.lines,
-          bestmove: result.bestmove,
-          personalityId: activeStyle,
-          skill: duelPlaying ? seatSkill(seat) : skill,
-          depth: result.depth,
-        });
+        const weakPick = weak ? pickByRating({ lines: result.lines, rating, styleOf: styled ? (uci) => styleScore(fen, uci, activeStyle) : undefined }) : null;
+        const choice = weakPick
+          ? { uci: weakPick.uci, san: sanOfUci(fen, weakPick.uci), bestUci: result.bestmove, bestSan: sanOfUci(fen, result.bestmove), diverged: weakPick.uci !== result.bestmove, note: "" }
+          : pickStyledMove({
+              fen,
+              lines: result.lines,
+              bestmove: result.bestmove,
+              personalityId: activeStyle,
+              skill: duelPlaying ? seatSkill(seat) : skill,
+              depth: result.depth,
+            });
         // Repetição: ganhando, não aceita o empate; perdendo, procura (o motor já recebe o histórico da partida).
         const topLine = result.lines.find((line) => line.multipv === 1) ?? result.lines[0];
         const rep = chooseWithRepetition({

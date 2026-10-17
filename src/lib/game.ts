@@ -1,5 +1,6 @@
 import { Chess, type Move, type Square } from "chess.js";
 import { type WhiteEval } from "@/lib/eval";
+import { isThreefold } from "@/lib/repetition";
 
 export type Ply = {
   fen: string;
@@ -111,10 +112,34 @@ export function resultText(fen: string): string | null {
     return chess.turn() === "w" ? "Xeque-mate. Vitória das pretas." : "Xeque-mate. Vitória das brancas.";
   }
   if (chess.isStalemate()) return "Empate por afogamento.";
-  if (chess.isThreefoldRepetition()) return "Empate por repetição.";
+  if (chess.isDrawByFiftyMoves()) return "Empate pela regra dos 50 lances.";
   if (chess.isInsufficientMaterial()) return "Empate por material insuficiente.";
   if (chess.isDraw()) return "Empate.";
   return null;
+}
+
+/** Resultado da partida, incluindo a repetição tripla (que só se enxerga olhando os lances, não um FEN solto). */
+export function outcomeOf(plies: Ply[]): string | null {
+  const last = plies[plies.length - 1];
+  if (!last) return null;
+  return resultText(last.fen) ?? (isThreefold(plies) ? "Empate por repetição." : null);
+}
+
+/** Posição inicial + lances até o índice `k`, no formato que o motor entende (`position fen ... moves ...`). */
+export function historyAt(plies: Ply[], k: number) {
+  const moves: string[] = [];
+  for (const ply of plies.slice(1, k + 1)) {
+    if (!ply.uci) return undefined;
+    moves.push(ply.uci);
+  }
+  return { startFen: plies[0].fen, moves };
+}
+
+/** Avaliação terminal na posição `k`: xeque-mate, afogamento, material, 50 lances ou repetição tripla. */
+export function terminalEvalAt(plies: Ply[], k: number): WhiteEval | null {
+  const fen = plies[k]?.fen;
+  if (!fen) return null;
+  return terminalEval(fen) ?? (isThreefold(plies.slice(0, k + 1)) ? { cp: 0, mate: null } : null);
 }
 
 export function pgnOf(plies: Ply[]) {

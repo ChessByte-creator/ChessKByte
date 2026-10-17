@@ -198,12 +198,16 @@ export const BEST_TOLERANCE = 2;
 export const GREAT_GAP = 12;
 /** ...ou por isto, mesmo sem mudar de faixa de avaliação. */
 export const GREAT_BIG_GAP = 25;
+/** Acima disto, o lance vale como Ótimo mesmo que um motor raso o ache (as alternativas perdem muito). */
+export const GREAT_OBVIOUS_GAP = 35;
 /** Brilhante: ainda não pode estar ganhando de lavada antes, nem perdendo depois. */
-export const BRILLIANT_MAX_BEFORE = 88;
+export const BRILLIANT_MAX_BEFORE = 92;
 export const BRILLIANT_MIN_AFTER = 45;
 export const BRILLIANT_MAX_LOSS = 2.5;
 /** Só descarta o sacrifício por haver alternativa tranquila quando quem joga já está melhor que isto. */
 export const QUIET_ALT_MIN_WIN = 55;
+/** Acima disto a posição já está esmagadora: um sacrifício que a mantém ainda vale (o Chess.com dá, ex.: Rb8+ com +5,7). */
+export const QUIET_ALT_MAX_WIN = 80;
 
 /** Faixa de avaliação de quem joga: 3 ganhando, 2 melhor, 1 igual, 0 pior, -1 perdendo. */
 export function zone(win: number) {
@@ -234,18 +238,26 @@ export function classifyMove(i: MoveClassInput): Judgment {
     // com a partida já decidida. Combinações seguidas podem ter vários brilhantes (o Chess.com também dá),
     // porque cada lance só conta se ele mesmo entrega material (ver `newSacrifice`).
     // Se já está melhor, um lance sem sacrifício quase igual dispensa o sacrifício; em posição igual/pior, não.
-    const quietAltMatters = i.quietAltClose && i.winBefore >= QUIET_ALT_MIN_WIN;
+    const quietAltMatters = i.quietAltClose && i.winBefore >= QUIET_ALT_MIN_WIN && i.winBefore < QUIET_ALT_MAX_WIN;
     if (i.sacrifice && !i.inCheck && i.winLoss < BRILLIANT_MAX_LOSS && i.winBefore <= BRILLIANT_MAX_BEFORE && i.winAfter >= BRILLIANT_MIN_AFTER && !quietAltMatters) {
       return "brilliant";
     }
     const hiddenWin = i.quiet && i.playedBest && !i.obvious && !i.inChain && !i.bestIsMate && i.gap >= 30 && i.winBefore <= 65 && i.winAfter >= 70;
     if (hiddenWin) return "brilliant";
+  }
 
+  if (nearBest && !i.freeCapture) {
     // Ótimo (!): lance crítico. Xeques e sequências forçadas contam (o Chess.com premia cada "único lance"),
     // mas um lance que um motor raso já acha só vale se for xeque ou se a diferença for enorme.
     const critical = i.secondWin !== null && i.gap >= GREAT_GAP && (zone(i.winBefore) - zone(i.secondWin) >= 1 || i.gap >= GREAT_BIG_GAP);
-    const hardToSee = !i.obvious || i.givesCheck;
-    if (i.playedBest && i.winLoss < 1.5 && critical && hardToSee && !i.bestIsMate && i.winBefore > 8 && i.winBefore < 90) return "great";
+    // Quando as alternativas perdem MUITO (gap grande), o lance é o único que segura, mesmo que um motor raso o ache:
+    // o Chess.com premia (a dama que escapa do único jeito, o xeque que só ele salva).
+    // Segurar a vitória: estava ganhando (≥60%) e todas as outras opções jogam isso fora (<60%).
+    const keepsTheWin = i.secondWin !== null && i.winBefore >= 60 && i.secondWin < 60 && i.gap >= 15;
+    const hardToSee = !i.obvious || i.givesCheck || i.gap >= GREAT_OBVIOUS_GAP || keepsTheWin;
+    // Fugir de um xeque com 3+ lances legais, sendo o único que segura (Ke2 em vez de Kf1), também é achado.
+    const freeForGreat = !i.forced && !i.recapture && (!i.nearlyForced || (i.legalCount >= 3 && i.gap >= 20));
+    if (freeForGreat && i.playedBest && i.winLoss < 1.5 && critical && hardToSee && !i.bestIsMate && i.winBefore > 8 && i.winBefore < 90) return "great";
   }
 
   // "Melhor" exige que a avaliação medida depois do lance confirme: o motor raso pode escolher um lance que a busca seguinte desmente.

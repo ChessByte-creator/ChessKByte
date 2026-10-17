@@ -22,6 +22,8 @@ export type SearchResult = {
 
 export type SearchOpts = {
   fen: string;
+  /** Posição inicial + lances até `fen`: sem isso o Stockfish não enxerga repetição de posição. */
+  history?: { startFen: string; moves: string[] };
   depth?: number;
   movetime?: number;
   multipv?: number;
@@ -249,7 +251,7 @@ export class StockfishEngine {
     this.send("setoption name UCI_LimitStrength value false");
     this.send(`setoption name MultiPV value ${opts.multipv ?? 1}`);
     await this.whenReady();
-    this.send(`position fen ${opts.fen}`);
+    this.send(opts.history ? `position fen ${opts.history.startFen}${opts.history.moves.length ? ` moves ${opts.history.moves.join(" ")}` : ""}` : `position fen ${opts.fen}`);
 
     let pushUpdate: ReturnType<typeof setInterval> | null = null;
     const result = await new Promise<SearchResult>((resolve) => {

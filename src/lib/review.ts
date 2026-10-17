@@ -135,7 +135,7 @@ export function continuesLine(prevLines: EngineLine[] | undefined, prevUci: stri
 const ZERO: WhiteEval = { cp: 0, mate: null };
 
 /** Um lance sem sacrifício a esta distância (em pontos de chance de vitória) do melhor torna o sacrifício dispensável. */
-const QUIET_ALT_WINDOW = 1.5;
+const QUIET_ALT_WINDOW = 1;
 
 /** Precisa buscar a posição depois do lance? (só quando ele não aparece nas linhas do motor). */
 export function needsAfterSearch(lines: EngineLine[], uci: string, bestUci: string) {
