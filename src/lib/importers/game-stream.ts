@@ -20,6 +20,8 @@ export class GameStream {
   readonly format: FileFormat;
 
   private iterator: AsyncIterator<Item>;
+  /** Faixa de rating do jogador mais forte pedida na busca: descarta pelo cabeçalho, antes de processar a partida. */
+  eloRange: { min: number; max: number } | null = null;
 
   private constructor(
     readonly file: File,
@@ -52,8 +54,11 @@ export class GameStream {
 
   async take(count: number, filters: GameFilters, signal?: AbortSignal, onScan?: (scanned: number, percent: number) => void, onFound?: (rows: GameRecord[]) => void): Promise<GameRecord[]> {
     const match = gameMatcher(filters);
+    this.eloRange = filters.minElo || filters.maxElo ? { min: filters.minElo ?? 0, max: filters.maxElo ?? 0 } : null;
     const found: GameRecord[] = [];
     let sinceYield = 0;
+    let lastReport = Date.now();
+    onScan?.(this.scanned, this.percent);
     while (found.length < count && !this.done) {
       if (signal?.aborted) break;
       const step = await this.iterator.next();
@@ -67,8 +72,10 @@ export class GameStream {
         onFound?.([game]);
       }
       sinceYield += 1;
-      if (sinceYield >= 2000) {
+      // Avisa o progresso e cede o fluxo à interface a cada ~0,3 s (num filtro raro, 2000 partidas podiam levar minutos no celular).
+      if (sinceYield >= 200 && Date.now() - lastReport >= 300) {
         sinceYield = 0;
+        lastReport = Date.now();
         onScan?.(this.scanned, this.percent);
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
@@ -92,6 +99,15 @@ function pgnGames(file: File, format: FileFormat, openings: OpeningsIndex | null
     });
     for await (const game of splitPgnAsync(lines)) {
       stream.scanned += 1;
+      const range = stream.eloRange;
+      if (range) {
+        // Rating pelo cabeçalho: evita processar os lances e a abertura de uma partida que o filtro vai descartar.
+        const strongest = Math.max(Number(game.headers.WhiteElo) || 0, Number(game.headers.BlackElo) || 0);
+        if ((range.min && strongest < range.min) || (range.max && (!strongest || strongest > range.max))) {
+          yield null;
+          continue;
+        }
+      }
       yield buildGame(game, { openings, source: file.name });
     }
   };

@@ -279,7 +279,10 @@ export class EcSource implements GameSource {
       const rows = await this.client.page(filter, this.cursor, upper, need);
       const elapsed = Date.now() - started;
       // Ajusta o tamanho da próxima faixa para cada consulta durar ~meio segundo.
-      this.range = Math.round(Math.min(MAX_RANGE, Math.max(MIN_RANGE, (this.range * TARGET_MS) / Math.max(elapsed, 25))));
+      // Só aumenta muito a faixa se a consulta varreu a faixa inteira: se parou cedo porque achou as linhas
+      // pedidas, o tempo curto não diz nada sobre o custo de uma faixa sem resultados (filtro raro).
+      const grown = (this.range * TARGET_MS) / Math.max(elapsed, 25);
+      this.range = Math.round(Math.min(MAX_RANGE, Math.max(MIN_RANGE, rows.length >= need ? Math.min(grown, this.range * 2) : grown)));
       const records = rows.map((row) => this.toRecord(row));
       found.push(...records);
       if (records.length > 0) onFound?.(records);
