@@ -59,6 +59,7 @@ export type EcFilter = {
   ecoPrefix?: string;
   resultRaw?: Array<string | number>;
   minElo?: number;
+  maxElo?: number;
   yearFrom?: number;
   yearTo?: number;
 };
@@ -375,6 +376,11 @@ export class EcDatabase {
     if (filter.minElo && g.whiteElo && g.blackElo) {
       where.push(`(g.${q(g.whiteElo)} >= ? OR g.${q(g.blackElo)} >= ?)`);
       params.push(filter.minElo, filter.minElo);
+    }
+    if (filter.maxElo && g.whiteElo && g.blackElo) {
+      // os dois com rating informado (1 em diante) e nenhum acima do máximo
+      where.push(`(CAST(g.${q(g.whiteElo)} AS INTEGER) BETWEEN 1 AND ? AND CAST(g.${q(g.blackElo)} AS INTEGER) BETWEEN 1 AND ?)`);
+      params.push(filter.maxElo, filter.maxElo);
     }
     if (g.date) {
       if (filter.yearFrom) {

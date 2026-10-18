@@ -197,6 +197,7 @@ export class EcSource implements GameSource {
     }
     if (filters.result && filters.result !== "all") out.resultRaw = this.info.resultSample.filter((raw) => mapEcResult(raw) === filters.result);
     if (filters.minElo) out.minElo = filters.minElo;
+    if (filters.maxElo) out.maxElo = filters.maxElo;
     if (filters.yearFrom) out.yearFrom = filters.yearFrom;
     if (filters.yearTo) out.yearTo = filters.yearTo;
     this.cachedKey = key;

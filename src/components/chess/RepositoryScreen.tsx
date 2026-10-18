@@ -33,7 +33,15 @@ const RESULT_CHIPS: Array<{ id: GameResult | "all"; label: string }> = [
   { id: "1/2-1/2", label: "Empate" },
   { id: "0-1", label: "Pretas" },
 ];
-const ELO_CHIPS = [0, 1500, 1800, 2000, 2200, 2400, 2600];
+/** Faixas prontas de rating do jogador mais forte (mínimo e máximo, 0 = sem limite). */
+const ELO_BANDS: Array<{ label: string; min: number; max: number }> = [
+  { label: "Qualquer", min: 0, max: 0 },
+  { label: "Até 1000", min: 0, max: 1000 },
+  { label: "1000–1400", min: 1000, max: 1400 },
+  { label: "1400–1800", min: 1400, max: 1800 },
+  { label: "1800–2200", min: 1800, max: 2200 },
+  { label: "2200+", min: 2200, max: 0 },
+];
 const OUTCOME_CHIPS: Array<{ id: "all" | "win" | "draw" | "loss"; label: string }> = [
   { id: "all", label: "Qualquer" },
   { id: "win", label: "Vitórias dele" },
@@ -63,6 +71,7 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
   const [result, setResult] = useState<GameResult | "all">(repoSession.draft?.result ?? "all");
   const [family, setFamily] = useState(repoSession.draft?.family ?? "");
   const [elo, setElo] = useState(repoSession.draft?.elo ?? 0);
+  const [eloMax, setEloMax] = useState(repoSession.draft?.eloMax ?? 0);
   const [yearFrom, setYearFrom] = useState(repoSession.draft?.yearFrom ?? "");
   const [yearTo, setYearTo] = useState(repoSession.draft?.yearTo ?? "");
   const [source, setSource] = useState(repoSession.draft?.source ?? "");
@@ -111,6 +120,7 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
       result: hasPlayer ? "all" : result,
       family: mode === "local" ? family || undefined : undefined,
       minElo: elo || undefined,
+      maxElo: eloMax || undefined,
       yearFrom: Number(yearFrom) || undefined,
       yearTo: Number(yearTo) || undefined,
       source: mode === "local" ? source || undefined : undefined,
@@ -128,8 +138,8 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
   }, []);
 
   // Valores mais recentes, para guardar na sessão quando a tela é desmontada.
-  const latest = useRef({ mode, pageSize, fileInfo, pageIdx, moreAhead, note, tokens, appliedTokens, side, outcome, kind, result, family, elo, yearFrom, yearTo, source });
-  latest.current = { mode, pageSize, fileInfo, pageIdx, moreAhead, note, tokens, appliedTokens, side, outcome, kind, result, family, elo, yearFrom, yearTo, source };
+  const latest = useRef({ mode, pageSize, fileInfo, pageIdx, moreAhead, note, tokens, appliedTokens, side, outcome, kind, result, family, elo, eloMax, yearFrom, yearTo, source });
+  latest.current = { mode, pageSize, fileInfo, pageIdx, moreAhead, note, tokens, appliedTokens, side, outcome, kind, result, family, elo, eloMax, yearFrom, yearTo, source };
 
   useEffect(() => {
     void refreshMeta();
@@ -148,7 +158,7 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
       repoSession.moreAhead = l.moreAhead;
       repoSession.applied = appliedRef.current;
       repoSession.note = l.note;
-      repoSession.draft = { tokens: l.tokens, appliedTokens: l.appliedTokens, side: l.side, outcome: l.outcome, kind: l.kind, result: l.result, family: l.family, elo: l.elo, yearFrom: l.yearFrom, yearTo: l.yearTo, source: l.source };
+      repoSession.draft = { tokens: l.tokens, appliedTokens: l.appliedTokens, side: l.side, outcome: l.outcome, kind: l.kind, result: l.result, family: l.family, elo: l.elo, eloMax: l.eloMax, yearFrom: l.yearFrom, yearTo: l.yearTo, source: l.source };
     };
   }, [refreshMeta]);
 
@@ -420,7 +430,7 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
     applied.outcome ? OUTCOME_CHIPS.find((chip) => chip.id === applied.outcome)?.label ?? "" : "",
     applied.kind && applied.kind !== "all" ? KIND_CHIPS.find((chip) => chip.id === applied.kind)?.label ?? "" : "",
     applied.result && applied.result !== "all" ? RESULT_CHIPS.find((chip) => chip.id === applied.result)?.label ?? "" : "",
-    applied.minElo ? `${applied.minElo}+` : "",
+    applied.minElo || applied.maxElo ? (applied.minElo && applied.maxElo ? `rating ${applied.minElo}–${applied.maxElo}` : applied.minElo ? `rating ${applied.minElo}+` : `rating até ${applied.maxElo}`) : "",
     applied.yearFrom || applied.yearTo ? `${applied.yearFrom ?? ""}–${applied.yearTo ?? ""}` : "",
   ].filter(Boolean);
 
@@ -445,6 +455,7 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
     setResult("all");
     setFamily("");
     setElo(0);
+    setEloMax(0);
     setYearFrom("");
     setYearTo("");
     setSource("");
@@ -530,13 +541,25 @@ export function RepositoryScreen({ openings, onOpen, active = true }: Props) {
               ))}
             </ChipRow>
           )}
-          <ChipRow label="Rating mínimo (o mais forte)">
-            {ELO_CHIPS.map((value) => (
-              <button key={value} type="button" aria-pressed={elo === value} className={chip(elo === value)} onClick={() => { setElo(value); bump(); }}>
-                {value === 0 ? "Qualquer" : `${value}+`}
-              </button>
-            ))}
+          <ChipRow label="Rating do jogador mais forte da partida">
+            {ELO_BANDS.map((band) => {
+              const on = elo === band.min && eloMax === band.max;
+              return (
+                <button key={band.label} type="button" aria-pressed={on} className={chip(on)} onClick={() => { setElo(band.min); setEloMax(band.max); bump(); }}>
+                  {band.label}
+                </button>
+              );
+            })}
           </ChipRow>
+          <div className="mt-3 grid grid-cols-2 gap-2 sm:max-w-sm">
+            <Field label="Rating de (mínimo)" id="repo-elomin">
+              <input id="repo-elomin" inputMode="numeric" placeholder="ex.: 800" value={elo || ""} onChange={(event) => { setElo(Number(event.target.value.replace(/\D/g, "").slice(0, 4)) || 0); bump(); }} className={input()} />
+            </Field>
+            <Field label="até (máximo)" id="repo-elomax">
+              <input id="repo-elomax" inputMode="numeric" placeholder="ex.: 1200" value={eloMax || ""} onChange={(event) => { setEloMax(Number(event.target.value.replace(/\D/g, "").slice(0, 4)) || 0); bump(); }} className={input()} />
+            </Field>
+          </div>
+          <p className="mt-1 text-xs text-muted">O limite vale para o jogador mais forte: com máximo 1200, os dois ficam em 1200 ou menos. Partidas sem rating não aparecem quando há máximo.</p>
 
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <div className="grid grid-cols-2 gap-2">

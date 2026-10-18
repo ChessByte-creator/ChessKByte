@@ -16,6 +16,7 @@ export type RepoDraft = {
   result: GameResult | "all";
   family: string;
   elo: number;
+  eloMax: number;
   yearFrom: string;
   yearTo: string;
   source: string;

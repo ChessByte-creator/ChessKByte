@@ -50,6 +50,8 @@ export type GameFilters = {
   kind?: OpeningKind | "gambit" | "all";
   result?: GameResult | "all";
   minElo?: number;
+  /** Rating máximo do jogador mais forte (então os dois estão abaixo disso). Partidas sem rating ficam de fora. */
+  maxElo?: number;
   yearFrom?: number;
   yearTo?: number;
   minPlies?: number;
@@ -201,6 +203,7 @@ function matches(game: GameRecord, f: GameFilters, text: string) {
   if (f.kind && f.kind !== "all" && !game.cat.includes(f.kind)) return false;
   if (f.result && f.result !== "all" && game.result !== f.result) return false;
   if (f.minElo && game.maxElo < f.minElo) return false;
+  if (f.maxElo && (!game.maxElo || game.maxElo > f.maxElo)) return false;
   if (f.yearFrom && game.year < f.yearFrom) return false;
   if (f.yearTo && game.year > f.yearTo) return false;
   if (f.minPlies && game.plies < f.minPlies) return false;
@@ -225,7 +228,7 @@ function driver(f: GameFilters): { index: string | null; range: IDBKeyRange | nu
   if (f.source) return { index: "source", range: IDBKeyRange.only(f.source) };
   if (f.result && f.result !== "all") return { index: "result", range: IDBKeyRange.only(f.result) };
   if (f.yearFrom || f.yearTo) return { index: "year", range: IDBKeyRange.bound(f.yearFrom ?? 0, f.yearTo ?? 9999) };
-  if (f.minElo) return { index: "maxElo", range: IDBKeyRange.lowerBound(f.minElo) };
+  if (f.minElo || f.maxElo) return { index: "maxElo", range: IDBKeyRange.bound(f.minElo ?? 1, f.maxElo ?? 99999) };
   return { index: null, range: null };
 }
 
