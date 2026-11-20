@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { PERSONALITIES, pickStyledMove, styleScore } from "./style.ts";
+import { PERSONALITIES, personalityById, pickStyledMove, setCustomMix, styleScore } from "./style.ts";
 
 const OPENING = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3";
 const MATE = "k7/8/1K6/8/8/8/8/7R w - - 0 1";
@@ -83,5 +83,37 @@ describe("pickStyledMove", () => {
     const develop = styleScore(start, "g1f3", "positional");
     const queen = styleScore(start, "d1h5", "positional");
     assert.ok(develop != null && queen != null && develop > queen, `${develop} vs ${queen}`);
+  });
+});
+
+describe("personalidades de sacrifício", () => {
+  // Brancas podem jogar Bxh7+ (sacrifício de ataque) ou o lance quieto Bd2.
+  const GREEK = "r1bq1rk1/ppp2ppp/2n1pn2/3p4/3P4/2NBPN2/PPP2PPP/R1BQ1RK1 w - - 0 9";
+  const lines = [line("c1d2", 30), line("d3h7 f6h7 f3g5 h7g5", -20)];
+
+  it("o Kamikaze joga o sacrifício de ataque dentro da janela", () => {
+    const choice = pickStyledMove({ fen: GREEK, bestmove: "c1d2", personalityId: "kamikaze", skill: 8, lines });
+    assert.equal(choice.uci, "d3h7");
+  });
+
+  it("o Sólido e o Materialista recusam o mesmo sacrifício", () => {
+    for (const id of ["solid", "materialist", "positional"] as const) {
+      const choice = pickStyledMove({ fen: GREEK, bestmove: "c1d2", personalityId: id, skill: 8, lines });
+      assert.equal(choice.uci, "c1d2", id);
+    }
+  });
+
+  it("a mistura 100% de um perfil é o próprio perfil", () => {
+    setCustomMix({ shares: { aggressive: 100 }, intensity: 100 }, false);
+    const custom = personalityById("custom");
+    const base = personalityById("aggressive");
+    assert.equal(custom.windowCp, base.windowCp);
+    assert.equal(custom.weights.kingAttack, base.weights.kingAttack);
+  });
+
+  it("misturar Agressivo e Sólido fica entre os dois", () => {
+    setCustomMix({ shares: { aggressive: 50, solid: 50 }, intensity: 100 }, false);
+    const mixed = personalityById("custom").weights.safety;
+    assert.ok(mixed > personalityById("aggressive").weights.safety && mixed < personalityById("solid").weights.safety);
   });
 });

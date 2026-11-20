@@ -44,6 +44,7 @@ import { SHAPE_COLORS, toggleShape, type Shape, type ShapeColor } from "@/lib/sh
 import { chooseWithRepetition, lineScore } from "@/lib/repetition";
 import { PERSONALITIES, personalityById, pickStyledMove, styleScore, type PersonalityId } from "@/lib/style";
 import { FULL_RATING, MAX_RATING, MIN_RATING, pickByRating, ratingOfSkill, skillOfRating, strengthBudget } from "@/lib/strength";
+import { StyleMixer } from "@/components/chess/StyleMixer";
 import { NewGameSheet, RatingPicker, ratingText, type SideChoice } from "@/components/chess/NewGameSheet";
 import { PuzzleScreen } from "@/components/chess/PuzzleScreen";
 import { OpeningsScreen } from "@/components/chess/OpeningsScreen";
@@ -452,7 +453,7 @@ export function ChessApp() {
     // Abaixo da força plena o motor calcula raso e com várias linhas; a escolha entre elas é feita por rating (strength.ts).
     const rating = duelPlaying ? seat.rating : botRating;
     const weak = engineToMove && rating <= MAX_RATING;
-    const budget = weak ? strengthBudget(rating, { pace: duelPlaying ? duelPace : null }) : thinkBudget(level, { styled, pace: duelPlaying ? duelPace : null });
+    const budget = weak ? strengthBudget(rating, { pace: duelPlaying ? duelPace : null }) : thinkBudget(level, { styled, wide: personalityById(activeStyle).windowCp >= 120, pace: duelPlaying ? duelPace : null });
     const history = historyAt(plies, cursor);
     const request = engineToMove
       ? { fen, history, ...budget }
@@ -479,7 +480,18 @@ export function ChessApp() {
         }
         if (cursorRef.current !== pliesRef.current.length - 1) return;
         if (pliesRef.current[pliesRef.current.length - 1]?.fen !== fen) return;
-        const weakPick = weak ? pickByRating({ lines: result.lines, rating, fen, styleOf: styled ? (uci) => styleScore(fen, uci, activeStyle) : undefined }) : null;
+        const persona = personalityById(activeStyle);
+        const pvByMove = new Map(result.lines.map((line) => [line.pv.trim().split(/\s+/)[0] ?? "", line.pv] as const));
+        const weakPick = weak
+          ? pickByRating({
+              lines: result.lines,
+              rating,
+              fen,
+              styleGain: persona.gain,
+              keepSacrifices: persona.weights.attackSac + persona.weights.sacrifice > 2.5,
+              styleOf: styled ? (uci) => styleScore(fen, uci, activeStyle, pvByMove.get(uci)) : undefined,
+            })
+          : null;
         const choice = weakPick
           ? { uci: weakPick.uci, san: sanOfUci(fen, weakPick.uci), bestUci: result.bestmove, bestSan: sanOfUci(fen, result.bestmove), diverged: weakPick.uci !== result.bestmove, note: "" }
           : pickStyledMove({
@@ -1499,6 +1511,7 @@ export function ChessApp() {
                 ))}
               </select>
               <p className="mt-1 text-sm text-muted">{personalityById(styleId).blurb}</p>
+              {styleId === "custom" ? <StyleMixer /> : null}
               <p className="mt-1 text-sm text-muted">
                 O estilo só escolhe entre lances que o motor já viu bem. No Máximo ele joga a linha principal do Stockfish e pensa alguns segundos.
               </p>
@@ -1795,6 +1808,7 @@ function SeatEditor({ title, seat, onChange }: { title: string; seat: BotSeat; o
         ))}
       </select>
       <p className="mt-1 text-sm text-muted">{personalityById(seat.styleId).blurb}</p>
+      {seat.styleId === "custom" ? <StyleMixer /> : null}
       <p className="mt-3 mb-2 text-sm text-muted">Nível</p>
       <RatingPicker value={seat.rating} onChange={(rating) => onChange({ ...seat, rating })} idPrefix={ratingInput} />
     </div>

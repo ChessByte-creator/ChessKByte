@@ -40,7 +40,7 @@ type Waiter = {
 };
 
 /** Time and depth for an honest search. Strength is applied later, on real scores. */
-export function thinkBudget(level: number, opts?: { pace?: number | null; styled?: boolean }) {
+export function thinkBudget(level: number, opts?: { pace?: number | null; styled?: boolean; wide?: boolean }) {
   const skill = Math.max(0, Math.min(20, level));
   const styled = opts?.styled ?? false;
   const pace = opts?.pace;
@@ -49,9 +49,11 @@ export function thinkBudget(level: number, opts?: { pace?: number | null; styled
   if (pace != null && pace <= 400) factor = 0.8;
   else if (pace != null && pace >= 1500) factor = 1.2;
   if (styled && skill < 18) factor *= 1.12;
+  if (styled && opts?.wide) factor *= 1.15;
   const movetime = Math.round(Math.max(900, Math.min(6000, base * factor)));
   const depth = skill >= 18 ? 18 : skill >= 12 ? 15 : skill >= 6 ? 13 : 11;
-  const multipv = styled ? (skill >= 16 ? 3 : 4) : 1;
+  // Mais linhas = mais lances de estilo para escolher; perfis de janela larga (sacrifício) precisam de mais.
+  const multipv = styled ? (opts?.wide ? 7 : skill >= 16 ? 4 : 5) : 1;
   return { movetime, depth, multipv };
 }
 

@@ -138,6 +138,10 @@ export function pickByRating(args: {
   fen?: string;
   rng?: () => number;
   styleOf?: (uci: string) => number | null;
+  /** Força do estilo na amostragem (padrão 0,5). Perfis como o Kamikaze usam mais. */
+  styleGain?: number;
+  /** Perfil de sacrifício: não descarta como "peça pendurada" o lance que o estilo quer. */
+  keepSacrifices?: boolean;
 }): WeakChoice | null {
   const rng = args.rng ?? Math.random;
   const seen = new Set<string>();
@@ -159,7 +163,7 @@ export function pickByRating(args: {
     const values = raw.map((item) => ({ uci: item.uci, v: args.styleOf?.(item.uci) ?? 0 }));
     const mean = values.reduce((s, x) => s + x.v, 0) / values.length;
     const sd = Math.sqrt(values.reduce((s, x) => s + (x.v - mean) ** 2, 0) / values.length) || 1;
-    biases = new Map(values.map((x) => [x.uci, Math.max(-1.5, Math.min(1.5, (x.v - mean) / sd)) * 0.5]));
+    biases = new Map(values.map((x) => [x.uci, Math.max(-1.5, Math.min(1.5, (x.v - mean) / sd)) * (args.styleGain ?? 0.5)]));
   }
   let cands: Cand[] = raw.map((item) => ({
     uci: item.uci,
@@ -172,7 +176,7 @@ export function pickByRating(args: {
   // Distração: só com probabilidade `blind` o bot "não vê" que o lance entrega uma peça. No resto das vezes ele
   // descarta esses lances (se sobrar algum outro), como um jogador do rating faria.
   if (args.fen && rng() >= p.blind) {
-    const safe = cands.filter((item) => !item.hangs);
+    const safe = cands.filter((item) => !item.hangs || (args.keepSacrifices === true && item.bias >= 0.5));
     if (safe.length > 0) cands = safe;
   }
 

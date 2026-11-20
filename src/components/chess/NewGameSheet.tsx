@@ -1,3 +1,4 @@
+import { StyleMixer } from "@/components/chess/StyleMixer";
 import { PERSONALITIES, personalityById, type PersonalityId } from "@/lib/style";
 import { FULL_RATING, LEVELS, MAX_RATING, MIN_RATING, ratingBand, ratingBlurb } from "@/lib/strength";
 
@@ -129,6 +130,7 @@ export function NewGameSheet({
           })}
         </div>
         <p className="mt-2 text-sm text-muted">{style.blurb}</p>
+        {settings.styleId === "custom" ? <StyleMixer /> : null}
       </div>
 
       <div className="rounded-3xl border border-line bg-paper p-4">

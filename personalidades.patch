@@ -1,0 +1,759 @@
+diff -ru orig/src/components/ChessApp.tsx ChessKByte-main/src/components/ChessApp.tsx
+--- orig/src/components/ChessApp.tsx	2026-11-20 20:58:35.900781666 +0000
++++ ChessKByte-main/src/components/ChessApp.tsx	2026-11-20 20:59:00.125059566 +0000
+@@ -44,6 +44,7 @@
+ import { chooseWithRepetition, lineScore } from "@/lib/repetition";
+ import { PERSONALITIES, personalityById, pickStyledMove, styleScore, type PersonalityId } from "@/lib/style";
+ import { FULL_RATING, MAX_RATING, MIN_RATING, pickByRating, ratingOfSkill, skillOfRating, strengthBudget } from "@/lib/strength";
++import { StyleMixer } from "@/components/chess/StyleMixer";
+ import { NewGameSheet, RatingPicker, ratingText, type SideChoice } from "@/components/chess/NewGameSheet";
+ import { PuzzleScreen } from "@/components/chess/PuzzleScreen";
+ import { OpeningsScreen } from "@/components/chess/OpeningsScreen";
+@@ -452,7 +453,7 @@
+     // Abaixo da força plena o motor calcula raso e com várias linhas; a escolha entre elas é feita por rating (strength.ts).
+     const rating = duelPlaying ? seat.rating : botRating;
+     const weak = engineToMove && rating <= MAX_RATING;
+-    const budget = weak ? strengthBudget(rating, { pace: duelPlaying ? duelPace : null }) : thinkBudget(level, { styled, pace: duelPlaying ? duelPace : null });
++    const budget = weak ? strengthBudget(rating, { pace: duelPlaying ? duelPace : null }) : thinkBudget(level, { styled, wide: personalityById(activeStyle).windowCp >= 120, pace: duelPlaying ? duelPace : null });
+     const history = historyAt(plies, cursor);
+     const request = engineToMove
+       ? { fen, history, ...budget }
+@@ -479,7 +480,18 @@
+         }
+         if (cursorRef.current !== pliesRef.current.length - 1) return;
+         if (pliesRef.current[pliesRef.current.length - 1]?.fen !== fen) return;
+-        const weakPick = weak ? pickByRating({ lines: result.lines, rating, fen, styleOf: styled ? (uci) => styleScore(fen, uci, activeStyle) : undefined }) : null;
++        const persona = personalityById(activeStyle);
++        const pvByMove = new Map(result.lines.map((line) => [line.pv.trim().split(/\s+/)[0] ?? "", line.pv] as const));
++        const weakPick = weak
++          ? pickByRating({
++              lines: result.lines,
++              rating,
++              fen,
++              styleGain: persona.gain,
++              keepSacrifices: persona.weights.attackSac + persona.weights.sacrifice > 2.5,
++              styleOf: styled ? (uci) => styleScore(fen, uci, activeStyle, pvByMove.get(uci)) : undefined,
++            })
++          : null;
+         const choice = weakPick
+           ? { uci: weakPick.uci, san: sanOfUci(fen, weakPick.uci), bestUci: result.bestmove, bestSan: sanOfUci(fen, result.bestmove), diverged: weakPick.uci !== result.bestmove, note: "" }
+           : pickStyledMove({
+@@ -1499,6 +1511,7 @@
+                 ))}
+               </select>
+               <p className="mt-1 text-sm text-muted">{personalityById(styleId).blurb}</p>
++              {styleId === "custom" ? <StyleMixer /> : null}
+               <p className="mt-1 text-sm text-muted">
+                 O estilo só escolhe entre lances que o motor já viu bem. No Máximo ele joga a linha principal do Stockfish e pensa alguns segundos.
+               </p>
+@@ -1795,6 +1808,7 @@
+         ))}
+       </select>
+       <p className="mt-1 text-sm text-muted">{personalityById(seat.styleId).blurb}</p>
++      {seat.styleId === "custom" ? <StyleMixer /> : null}
+       <p className="mt-3 mb-2 text-sm text-muted">Nível</p>
+       <RatingPicker value={seat.rating} onChange={(rating) => onChange({ ...seat, rating })} idPrefix={ratingInput} />
+     </div>
+diff -ru orig/src/components/chess/NewGameSheet.tsx ChessKByte-main/src/components/chess/NewGameSheet.tsx
+--- orig/src/components/chess/NewGameSheet.tsx	2026-11-20 20:58:35.901137662 +0000
++++ ChessKByte-main/src/components/chess/NewGameSheet.tsx	2026-11-20 20:59:00.125480650 +0000
+@@ -1,3 +1,4 @@
++import { StyleMixer } from "@/components/chess/StyleMixer";
+ import { PERSONALITIES, personalityById, type PersonalityId } from "@/lib/style";
+ import { FULL_RATING, LEVELS, MAX_RATING, MIN_RATING, ratingBand, ratingBlurb } from "@/lib/strength";
+ 
+@@ -129,6 +130,7 @@
+           })}
+         </div>
+         <p className="mt-2 text-sm text-muted">{style.blurb}</p>
++        {settings.styleId === "custom" ? <StyleMixer /> : null}
+       </div>
+ 
+       <div className="rounded-3xl border border-line bg-paper p-4">
+Only in ChessKByte-main/src/components/chess: StyleMixer.tsx
+diff -ru orig/src/lib/engine.ts ChessKByte-main/src/lib/engine.ts
+--- orig/src/lib/engine.ts	2026-11-20 20:58:35.904184184 +0000
++++ ChessKByte-main/src/lib/engine.ts	2026-11-20 20:59:00.123866870 +0000
+@@ -40,7 +40,7 @@
+ };
+ 
+ /** Time and depth for an honest search. Strength is applied later, on real scores. */
+-export function thinkBudget(level: number, opts?: { pace?: number | null; styled?: boolean }) {
++export function thinkBudget(level: number, opts?: { pace?: number | null; styled?: boolean; wide?: boolean }) {
+   const skill = Math.max(0, Math.min(20, level));
+   const styled = opts?.styled ?? false;
+   const pace = opts?.pace;
+@@ -49,9 +49,11 @@
+   if (pace != null && pace <= 400) factor = 0.8;
+   else if (pace != null && pace >= 1500) factor = 1.2;
+   if (styled && skill < 18) factor *= 1.12;
++  if (styled && opts?.wide) factor *= 1.15;
+   const movetime = Math.round(Math.max(900, Math.min(6000, base * factor)));
+   const depth = skill >= 18 ? 18 : skill >= 12 ? 15 : skill >= 6 ? 13 : 11;
+-  const multipv = styled ? (skill >= 16 ? 3 : 4) : 1;
++  // Mais linhas = mais lances de estilo para escolher; perfis de janela larga (sacrifício) precisam de mais.
++  const multipv = styled ? (opts?.wide ? 7 : skill >= 16 ? 4 : 5) : 1;
+   return { movetime, depth, multipv };
+ }
+ 
+diff -ru orig/src/lib/strength.ts ChessKByte-main/src/lib/strength.ts
+--- orig/src/lib/strength.ts	2026-11-20 20:58:35.906456299 +0000
++++ ChessKByte-main/src/lib/strength.ts	2026-11-20 20:59:00.121125372 +0000
+@@ -138,6 +138,10 @@
+   fen?: string;
+   rng?: () => number;
+   styleOf?: (uci: string) => number | null;
++  /** Força do estilo na amostragem (padrão 0,5). Perfis como o Kamikaze usam mais. */
++  styleGain?: number;
++  /** Perfil de sacrifício: não descarta como "peça pendurada" o lance que o estilo quer. */
++  keepSacrifices?: boolean;
+ }): WeakChoice | null {
+   const rng = args.rng ?? Math.random;
+   const seen = new Set<string>();
+@@ -159,7 +163,7 @@
+     const values = raw.map((item) => ({ uci: item.uci, v: args.styleOf?.(item.uci) ?? 0 }));
+     const mean = values.reduce((s, x) => s + x.v, 0) / values.length;
+     const sd = Math.sqrt(values.reduce((s, x) => s + (x.v - mean) ** 2, 0) / values.length) || 1;
+-    biases = new Map(values.map((x) => [x.uci, Math.max(-1.5, Math.min(1.5, (x.v - mean) / sd)) * 0.5]));
++    biases = new Map(values.map((x) => [x.uci, Math.max(-1.5, Math.min(1.5, (x.v - mean) / sd)) * (args.styleGain ?? 0.5)]));
+   }
+   let cands: Cand[] = raw.map((item) => ({
+     uci: item.uci,
+@@ -172,7 +176,7 @@
+   // Distração: só com probabilidade `blind` o bot "não vê" que o lance entrega uma peça. No resto das vezes ele
+   // descarta esses lances (se sobrar algum outro), como um jogador do rating faria.
+   if (args.fen && rng() >= p.blind) {
+-    const safe = cands.filter((item) => !item.hangs);
++    const safe = cands.filter((item) => !item.hangs || (args.keepSacrifices === true && item.bias >= 0.5));
+     if (safe.length > 0) cands = safe;
+   }
+ 
+diff -ru orig/src/lib/style.test.ts ChessKByte-main/src/lib/style.test.ts
+--- orig/src/lib/style.test.ts	2026-11-20 20:58:35.906493316 +0000
++++ ChessKByte-main/src/lib/style.test.ts	2026-11-20 20:59:11.137126027 +0000
+@@ -1,6 +1,6 @@
+ import assert from "node:assert/strict";
+ import { describe, it } from "node:test";
+-import { PERSONALITIES, pickStyledMove, styleScore } from "./style.ts";
++import { PERSONALITIES, personalityById, pickStyledMove, setCustomMix, styleScore } from "./style.ts";
+ 
+ const OPENING = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3";
+ const MATE = "k7/8/1K6/8/8/8/8/7R w - - 0 1";
+@@ -85,3 +85,35 @@
+     assert.ok(develop != null && queen != null && develop > queen, `${develop} vs ${queen}`);
+   });
+ });
++
++describe("personalidades de sacrifício", () => {
++  // Brancas podem jogar Bxh7+ (sacrifício de ataque) ou o lance quieto Bd2.
++  const GREEK = "r1bq1rk1/ppp2ppp/2n1pn2/3p4/3P4/2NBPN2/PPP2PPP/R1BQ1RK1 w - - 0 9";
++  const lines = [line("c1d2", 30), line("d3h7 f6h7 f3g5 h7g5", -20)];
++
++  it("o Kamikaze joga o sacrifício de ataque dentro da janela", () => {
++    const choice = pickStyledMove({ fen: GREEK, bestmove: "c1d2", personalityId: "kamikaze", skill: 8, lines });
++    assert.equal(choice.uci, "d3h7");
++  });
++
++  it("o Sólido e o Materialista recusam o mesmo sacrifício", () => {
++    for (const id of ["solid", "materialist", "positional"] as const) {
++      const choice = pickStyledMove({ fen: GREEK, bestmove: "c1d2", personalityId: id, skill: 8, lines });
++      assert.equal(choice.uci, "c1d2", id);
++    }
++  });
++
++  it("a mistura 100% de um perfil é o próprio perfil", () => {
++    setCustomMix({ shares: { aggressive: 100 }, intensity: 100 }, false);
++    const custom = personalityById("custom");
++    const base = personalityById("aggressive");
++    assert.equal(custom.windowCp, base.windowCp);
++    assert.equal(custom.weights.kingAttack, base.weights.kingAttack);
++  });
++
++  it("misturar Agressivo e Sólido fica entre os dois", () => {
++    setCustomMix({ shares: { aggressive: 50, solid: 50 }, intensity: 100 }, false);
++    const mixed = personalityById("custom").weights.safety;
++    assert.ok(mixed > personalityById("aggressive").weights.safety && mixed < personalityById("solid").weights.safety);
++  });
++});
+diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
+--- orig/src/lib/style.ts	2026-11-20 20:58:35.906531435 +0000
++++ ChessKByte-main/src/lib/style.ts	2026-11-20 20:58:35.943904372 +0000
+@@ -15,7 +15,9 @@
+   | "solid"
+   | "materialist"
+   | "speculative"
+-  | "simplifier";
++  | "simplifier"
++  | "kamikaze"
++  | "custom";
+ 
+ type Axis =
+   | "check"
+@@ -34,7 +36,9 @@
+   | "simplify"
+   | "safety"
+   | "quiet"
+-  | "restraint";
++  | "restraint"
++  | "attackSac"
++  | "gambit";
+ 
+ type Weights = Record<Axis, number>;
+ type Features = Record<Axis, number>;
+@@ -46,6 +50,16 @@
+   /** Centipawn slack at mid strength. High skill tightens this; low skill widens it. */
+   windowCp: number;
+   weights: Weights;
++  /** Peso da avaliação do motor na escolha (1 = padrão). Baixo = aceita perder avaliação por estilo. */
++  care?: number;
++  /** Força do estilo quando o bot joga por rating (strength.ts). */
++  gain?: number;
++  /** Sacrifício máximo que o perfil aceita: lances acima disso saem da lista. */
++  sacCap?: number;
++  /** Havendo sacrifício de ataque dentro da janela, o perfil joga um deles. */
++  forceAttackSac?: boolean;
++  /** Avaliação absoluta mínima (cp) que o perfil aceita criar por estilo. */
++  floorCp?: number;
+ };
+ 
+ const ZERO_W: Weights = {
+@@ -66,12 +80,17 @@
+   safety: 0,
+   quiet: 0,
+   restraint: 0,
++  attackSac: 0,
++  gambit: 0,
+ };
+ 
+ function w(partial: Partial<Weights>): Weights {
+   return { ...ZERO_W, ...partial };
+ }
+ 
++/** Perfil editável: o que o usuário mistura nos controles (ver setCustomMix). Mutado no lugar. */
++const CUSTOM: Personality = { id: "custom", name: "Personalizado", blurb: "", windowCp: 0, weights: w({}) };
++
+ export const PERSONALITIES: Personality[] = [
+   {
+     id: "balanced",
+@@ -83,19 +102,46 @@
+   {
+     id: "aggressive",
+     name: "Agressivo",
+-    blurb: "Ataca o rei, abre linhas e aceita risco para ficar com a iniciativa.",
+-    windowCp: 110,
++    blurb: "Ataca o rei, abre linhas e aceita risco para ficar com a iniciativa. Sacrifica quando o ataque compensa.",
++    windowCp: 130,
++    care: 0.8,
++    gain: 1,
++    floorCp: -150,
+     weights: w({
+-      check: 3.2,
++      check: 3,
+       kingAttack: 3.4,
+-      storm: 2.4,
+-      sacrifice: 1.6,
++      storm: 2.6,
++      attackSac: 2.2,
++      sacrifice: 0.8,
+       tension: 0.8,
+-      castle: 0.4,
++      develop: 0.4,
+       safety: -0.6,
+-      quiet: -0.8,
+-      simplify: -1.4,
+-      trade: -0.6,
++      quiet: -1,
++      simplify: -1.6,
++      trade: -0.8,
++    }),
++  },
++  {
++    id: "kamikaze",
++    name: "Kamikaze",
++    blurb: "Sacrifica material em quase todo ataque. Quer o rei do adversário, não a vantagem.",
++    windowCp: 260,
++    care: 0.35,
++    gain: 1.6,
++    floorCp: -260,
++    forceAttackSac: true,
++    weights: w({
++      attackSac: 5,
++      sacrifice: 2.2,
++      check: 3.4,
++      kingAttack: 3.8,
++      storm: 2.6,
++      tension: 1,
++      material: -1.4,
++      safety: -1.4,
++      quiet: -1.6,
++      simplify: -2.4,
++      trade: -1.6,
+     }),
+   },
+   {
+@@ -103,34 +149,38 @@
+     name: "Posicional",
+     blurb: "Melhora peças, peões e o centro. Evita ataque prematuro e dama solta.",
+     windowCp: 70,
++    gain: 0.8,
++    sacCap: 0.9,
+     weights: w({
+       center: 2.6,
+       structure: 3.2,
+       develop: 2.2,
+-      castle: 1.6,
++      castle: 1.2,
+       bind: 2.4,
+       restraint: 2.2,
+       quiet: 1.1,
+-      safety: 0.8,
++      safety: 0.5,
+       check: -0.4,
+       sacrifice: -2.4,
++      attackSac: -2,
++      gambit: -1.5,
+       capture: -0.2,
+     }),
+   },
+   {
+     id: "tactical",
+     name: "Tático",
+-    blurb: "Procura xeques, capturas, cravadas e posições com várias ameaças.",
++    blurb: "Procura capturas, cravadas e posições com várias ameaças ao mesmo tempo.",
+     windowCp: 100,
++    gain: 0.9,
+     weights: w({
+-      check: 2.4,
++      check: 2,
+       capture: 1.8,
+-      tension: 2.8,
+-      bind: 2.2,
+-      kingAttack: 1.6,
+-      sacrifice: 1.2,
+-      quiet: -1.6,
+-      simplify: -1.8,
++      tension: 3,
++      bind: 2.6,
++      kingAttack: 0.9,
++      quiet: -1.8,
++      simplify: -1.6,
+       trade: -0.4,
+     }),
+   },
+@@ -139,16 +189,20 @@
+     name: "Sólido",
+     blurb: "Cuida do rei, evita sacrifício e só entra no que está bem defendido.",
+     windowCp: 55,
++    gain: 0.9,
++    sacCap: 0.5,
+     weights: w({
+       safety: 3.6,
+       castle: 2.4,
+-      structure: 2.2,
++      structure: 1.8,
+       develop: 1.4,
+       restraint: 1.8,
+       quiet: 0.8,
+       sacrifice: -3.2,
++      attackSac: -2.5,
++      gambit: -2,
+       check: -0.5,
+-      storm: -0.8,
++      storm: -1.2,
+     }),
+   },
+   {
+@@ -156,11 +210,15 @@
+     name: "Materialista",
+     blurb: "Prefere a peça a mais e desconfia de compensação e de gambito.",
+     windowCp: 80,
++    gain: 0.9,
++    sacCap: 0.4,
+     weights: w({
+       material: 4.2,
+       capture: 1.6,
+-      trade: 0.8,
++      trade: -0.2,
+       sacrifice: -3.4,
++      attackSac: -2.5,
++      gambit: -2.5,
+       safety: 0.6,
+       storm: -0.4,
+     }),
+@@ -168,15 +226,20 @@
+   {
+     id: "speculative",
+     name: "Especulativo",
+-    blurb: "Entrega peão ou qualidade por desenvolvimento, linhas abertas e ataque.",
+-    windowCp: 130,
++    blurb: "Oferece gambitos: entrega peão por desenvolvimento, centro e linhas abertas.",
++    windowCp: 140,
++    care: 0.7,
++    gain: 1.1,
+     weights: w({
+-      sacrifice: 3.4,
+-      storm: 2.2,
+-      kingAttack: 2.4,
+-      develop: 1.4,
+-      check: 1.2,
+-      material: -1.6,
++      gambit: 3.6,
++      sacrifice: 1.8,
++      attackSac: 1,
++      storm: 1.6,
++      kingAttack: 1.6,
++      develop: 1.8,
++      center: 1,
++      check: 0.8,
++      material: -1.2,
+       quiet: -0.6,
+       simplify: -1.2,
+     }),
+@@ -186,6 +249,8 @@
+     name: "Simplificador",
+     blurb: "Troca peças, reduz o perigo e conduz o jogo para um final mais fácil.",
+     windowCp: 75,
++    gain: 0.9,
++    sacCap: 0.6,
+     weights: w({
+       trade: 3.2,
+       simplify: 3.4,
+@@ -193,10 +258,13 @@
+       safety: 1.1,
+       castle: 0.6,
+       sacrifice: -2.2,
++      attackSac: -2,
++      gambit: -2,
+       storm: -0.6,
+       check: -0.3,
+     }),
+   },
++  CUSTOM,
+ ];
+ 
+ const BY_ID = Object.fromEntries(PERSONALITIES.map((item) => [item.id, item])) as Record<PersonalityId, Personality>;
+@@ -206,6 +274,109 @@
+   return BY_ID.balanced;
+ }
+ 
++// ---------------------------------------------------------------------------------------------------------
++// Mistura de personalidades: "Personalizado" = média ponderada dos perfis (cada um de 0 a 100%) × intensidade.
++// "Equilibrado" na mistura funciona como diluente: quanto mais, mais perto do Stockfish puro.
++// ---------------------------------------------------------------------------------------------------------
++
++export type MixId = Exclude<PersonalityId, "custom">;
++export type StyleMix = { shares: Partial<Record<MixId, number>>; intensity: number };
++
++export const MIX_IDS: MixId[] = ["balanced", "aggressive", "kamikaze", "tactical", "speculative", "positional", "solid", "materialist", "simplifier"];
++export const DEFAULT_MIX: StyleMix = { shares: { balanced: 30, aggressive: 70 }, intensity: 100 };
++
++const AXES = Object.keys(ZERO_W) as Axis[];
++const MIX_KEY = "byte.styleMix";
++let customMix: StyleMix = DEFAULT_MIX;
++
++function blend(mix: StyleMix): Omit<Personality, "id" | "name"> {
++  const parts = MIX_IDS.map((id) => ({ item: BY_ID[id], share: clamp(mix.shares[id] ?? 0, 0, 100) })).filter((part) => part.share > 0);
++  const total = parts.reduce((sum, part) => sum + part.share, 0);
++  const k = clamp(mix.intensity, 0, 150) / 100;
++  if (total <= 0 || k === 0) {
++    return { blurb: "Sem estilo: joga como o Stockfish.", windowCp: 0, weights: w({}) };
++  }
++  const weights = w({});
++  let windowCp = 0;
++  let care = 0;
++  let gain = 0;
++  let cap = 0;
++  let floor = 0;
++  let force = 0;
++  for (const { item, share } of parts) {
++    const f = share / total;
++    for (const axis of AXES) weights[axis] += item.weights[axis] * f * k;
++    windowCp += item.windowCp * f;
++    care += (item.care ?? 1) * f;
++    gain += (item.gain ?? 0.5) * f;
++    cap += (item.sacCap ?? 3.5) * f;
++    floor += (item.floorCp ?? -600) * f;
++    if (item.forceAttackSac) force += f;
++  }
++  const top = parts
++    .slice()
++    .sort((a, b) => b.share - a.share)
++    .slice(0, 3)
++    .map(({ item, share }) => `${Math.round((share / total) * 100)}% ${item.name}`);
++  return {
++    blurb: `Mistura: ${top.join(" + ")}.`,
++    windowCp: Math.round(windowCp * Math.max(0.6, k)),
++    weights,
++    care,
++    gain: clamp(gain * k, 0.3, 2),
++    sacCap: cap >= 3 ? undefined : cap,
++    floorCp: floor <= -550 ? undefined : Math.round(floor),
++    forceAttackSac: force >= 0.5,
++  };
++}
++
++export function getCustomMix(): StyleMix {
++  return customMix;
++}
++
++/** Define a mistura do perfil "Personalizado" (e guarda no navegador). */
++export function setCustomMix(mix: StyleMix, persist = true) {
++  customMix = { shares: { ...mix.shares }, intensity: mix.intensity };
++  Object.assign(CUSTOM, blend(customMix));
++  if (!persist || typeof localStorage === "undefined") return;
++  try {
++    localStorage.setItem(MIX_KEY, JSON.stringify(customMix));
++  } catch {
++    /* sem armazenamento: a mistura vale só nesta sessão */
++  }
++}
++
++/** Resumo do perfil em 6 eixos de -1 (evita) a +1 (busca), para os gráficos. */
++export function traitProfile(personality: Personality): Array<{ id: string; label: string; value: number }> {
++  const sum = (axes: Axis[]) => axes.reduce((total, axis) => total + personality.weights[axis], 0);
++  const groups: Array<[string, string, Axis[], number]> = [
++    ["attack", "Ataque ao rei", ["check", "kingAttack", "storm"], 10],
++    ["sacrifice", "Sacrifício", ["sacrifice", "attackSac", "gambit"], 10],
++    ["position", "Posição", ["center", "structure", "develop", "bind"], 8],
++    ["safety", "Segurança", ["safety", "castle", "restraint"], 6],
++    ["material", "Material", ["material", "capture"], 6],
++    ["simplify", "Trocas", ["trade", "simplify"], 6],
++  ];
++  return groups.map(([id, label, axes, scale]) => ({ id, label, value: clamp(sum(axes) / scale, -1, 1) }));
++}
++
++function loadStoredMix() {
++  setCustomMix(DEFAULT_MIX, false);
++  if (typeof localStorage === "undefined") return;
++  try {
++    const raw = localStorage.getItem(MIX_KEY);
++    if (!raw) return;
++    const saved = JSON.parse(raw) as Partial<StyleMix>;
++    if (saved && typeof saved === "object" && saved.shares && typeof saved.intensity === "number") {
++      setCustomMix({ shares: saved.shares, intensity: saved.intensity }, false);
++    }
++  } catch {
++    /* ignora dado corrompido */
++  }
++}
++
++loadStoredMix();
++
+ const AXIS_REASON: Record<Axis, string> = {
+   check: "busca o xeque",
+   kingAttack: "ataca o rei",
+@@ -224,6 +395,8 @@
+   safety: "joga mais seguro",
+   quiet: "melhora sem forçar",
+   restraint: "segura a dama",
++  attackSac: "sacrifica para atacar o rei",
++  gambit: "oferece um gambito",
+ };
+ 
+ const PIECE_VALUE: Record<PieceSymbol, number> = { p: 1, n: 3, b: 3.1, r: 5, q: 9, k: 0 };
+@@ -257,7 +430,7 @@
+ export function styleWindow(personality: Personality, skill: number): number {
+   if (personality.windowCp <= 0) return 0;
+   const clamped = Math.max(0, Math.min(20, skill));
+-  const factor = 0.32 + ((20 - clamped) / 20) * 1.2;
++  const factor = 0.55 + ((20 - clamped) / 20) * 0.9;
+   return Math.round(personality.windowCp * factor);
+ }
+ 
+@@ -297,24 +470,43 @@
+   }
+ 
+   const mates = trusted.filter((item) => item.mate != null && item.mate > 0);
++  const takingMate = mates.length > 0 && (objective.mate ?? 0) > 0;
+   let candidates = trusted;
+-  if (mates.length > 0 && (objective.mate ?? 0) > 0) {
++  if (takingMate) {
+     const shortest = Math.min(...mates.map((item) => item.mate ?? 99));
+     candidates = mates.filter((item) => (item.mate ?? 99) <= shortest + 1);
+   } else {
+-    const window = styleWindow(personality, args.skill);
+-    candidates = pool.filter((item) => objective.score - item.score <= window);
++    // Perfis de sacrifício ganham folga extra quando já estão pior: nada a perder.
++    const sacrificial = personality.weights.attackSac + personality.weights.sacrifice > 2.5;
++    const stretch = sacrificial && objective.score < -80 ? 1.3 : 1;
++    const window = Math.round(styleWindow(personality, args.skill) * stretch);
++    const floor = personality.floorCp != null ? Math.min(personality.floorCp, objective.score) : -Infinity;
++    candidates = pool.filter((item) => objective.score - item.score <= window && item.score >= floor);
+   }
+   if (candidates.length === 0) candidates = [objective];
+ 
++  const raws = new Map<string, Features>();
++  for (const item of candidates) raws.set(item.uci, lineFeatures(args.fen, item.pv));
++  if (!takingMate) {
++    // Fidelidade: o que o perfil recusa nunca entra; o que ele ama tem prioridade.
++    if (personality.sacCap != null) {
++      const cap = personality.sacCap;
++      const kept = candidates.filter((item) => (raws.get(item.uci)?.sacrifice ?? 0) <= cap);
++      if (kept.length > 0) candidates = kept;
++    }
++    if (personality.forceAttackSac) {
++      const attacking = candidates.filter((item) => (raws.get(item.uci)?.attackSac ?? 0) >= 1.2);
++      if (attacking.length > 0) candidates = attacking;
++    }
++  }
++
+   let chosen = objective;
+   let bestTotal = -Infinity;
+   const scored = new Map<string, { total: number; weighted: Features }>();
+   for (const item of candidates) {
+-    const raw = lineFeatures(args.fen, item.pv);
+-    const weighted = applyWeights(raw, personality.weights);
++    const weighted = applyWeights(raws.get(item.uci) ?? zeroFeatures(), personality.weights);
+     const jitter = (hashText(`${args.fen}|${item.uci}`) - 0.5) * 0.18;
+-    const evalNudge = (item.score - objective.score) / 32;
++    const evalNudge = ((item.score - objective.score) / 32) * (personality.care ?? 1);
+     const total = sumFeatures(weighted) + jitter + evalNudge;
+     scored.set(item.uci, { total, weighted });
+     if (total > bestTotal) {
+@@ -322,9 +514,10 @@
+       chosen = item;
+     }
+   }
++  const objectiveWeighted = applyWeights(raws.get(objective.uci) ?? lineFeatures(args.fen, objective.pv), personality.weights);
+ 
+   const diverged = chosen.uci !== objective.uci;
+-  const reason = diverged ? reasonFor(scored.get(chosen.uci)?.weighted, scored.get(objective.uci)?.weighted) : "";
++  const reason = diverged ? reasonFor(scored.get(chosen.uci)?.weighted, objectiveWeighted) : "";
+   const note = diverged ? `${personality.name} escolheu ${chosen.san} em vez de ${objective.san}: ${reason}.` : "";
+   return {
+     uci: chosen.uci,
+@@ -336,12 +529,13 @@
+   };
+ }
+ 
+-/** Raw style score of one legal move, before the eval tie-break. */
+-export function styleScore(fen: string, uci: string, personalityId: PersonalityId): number | null {
++/** Raw style score of one legal move, before the eval tie-break. Com `pv`, olha também os próximos lances da linha. */
++export function styleScore(fen: string, uci: string, personalityId: PersonalityId, pv?: string): number | null {
+   const played = playToken(fen, uci);
+   if (!played) return null;
+   const personality = personalityById(personalityId);
+-  return sumFeatures(applyWeights(featuresOf(fen, played.move, played.chess), personality.weights));
++  const features = pv && pv.trim().split(/\s+/)[0] === uci ? lineFeatures(fen, pv) : featuresOf(fen, played.move, played.chess);
++  return sumFeatures(applyWeights(features, personality.weights));
+ }
+ 
+ type Candidate = {
+@@ -382,11 +576,78 @@
+   return line.scoreCp ?? -30000;
+ }
+ 
++const HORIZON_PLIES = 4;
++
++function playIn(chess: Chess, uci: string): Move | null {
++  if (!/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(uci)) return null;
++  try {
++    return (
++      chess.move({
++        from: uci.slice(0, 2) as Square,
++        to: uci.slice(2, 4) as Square,
++        promotion: uci.length > 4 ? (uci[4] as "q" | "r" | "b" | "n") : undefined,
++      }) ?? null
++    );
++  } catch {
++    return null;
++  }
++}
++
++/** Estilo do lance visto pela linha do motor: o 1º lance mais o que os próximos custam ou rendem (sacrifício de verdade). */
+ function lineFeatures(fen: string, pv: string): Features {
+-  const uci = pv.trim().split(/\s+/)[0] ?? "";
+-  const played = playToken(fen, uci);
+-  if (!played) return zeroFeatures();
+-  return featuresOf(fen, played.move, played.chess);
++  const tokens = pv.trim().split(/\s+/).filter(Boolean);
++  const first = playToken(fen, tokens[0] ?? "");
++  if (!first) return zeroFeatures();
++  const base = featuresOf(fen, first.move, first.chess);
++  if (tokens.length < 2) return base;
++
++  const us = first.move.color;
++  const them: Color = us === "w" ? "b" : "w";
++  const walker = new Chess(fen);
++  const startMap = occupy(walker);
++  const startNet = material(startMap, us) - material(startMap, them);
++  const limit = Math.min(tokens.length, HORIZON_PLIES);
++  let worst = 0;
++  let endNet = 0;
++  let endMap = startMap;
++  let played = 0;
++  let checks = 0;
++  for (let i = 0; i < limit; i += 1) {
++    const step = playIn(walker, tokens[i] ?? "");
++    if (!step) break;
++    played = i + 1;
++    if (i % 2 === 0 && step.san.includes("+")) checks += 1;
++    // Só mede o material em posição "assentada": depois da resposta do adversário (ou no fim da linha).
++    if (played % 2 === 0 || played === limit) {
++      const map = occupy(walker);
++      const net = material(map, us) - material(map, them) - startNet;
++      worst = Math.min(worst, net);
++      endNet = net;
++      endMap = map;
++    }
++  }
++  if (played < 2) return base;
++
++  const deficit = -worst;
++  const recovered = endNet >= -0.3 ? 0.4 : 1;
++  const sacrifice = deficit >= 0.8 ? clamp((deficit * recovered) / 1.15, 0, 3.5) : 0;
++  const horizonKing = clamp((kingPressure(endMap, us) - kingPressure(startMap, us)) / 1.15, -1.5, 3);
++  const kingAttack = Math.max(base.kingAttack, horizonKing * 0.85);
++  const attackish = base.check > 0 || checks > 0 || kingAttack > 0.35 || base.storm > 0.2;
++  const ourDelta = material(endMap, us) - material(startMap, us);
++  const theirDelta = material(endMap, them) - material(startMap, them);
++
++  return {
++    ...base,
++    check: Math.max(base.check, Math.min(1.45, checks * 0.7)),
++    kingAttack,
++    sacrifice,
++    attackSac: attackish ? sacrifice : 0,
++    gambit: !attackish && sacrifice > 0 && deficit <= 2.1 && (base.develop > 0 || base.center >= 0.6) ? sacrifice : 0,
++    material: clamp(endNet / 1.1, -3, 3),
++    trade: tradeScore(ourDelta, theirDelta),
++    simplify: simplifyScore(startMap, endMap, endNet),
++  };
+ }
+ 
+ function featuresOf(fen: string, move: Move, after: Chess): Features {
+@@ -402,6 +663,8 @@
+   const kingAttack = clamp((kingPressure(afterMap, us) - kingPressure(beforeMap, us)) / 1.15, -1.5, 3);
+   const storm = pawnStorm(move, them, beforeMap);
+   const tension = clamp(attackTension(beforeMap, afterMap, us) / 2.2, -1.5, 2.6);
++  const attackish = check > 0 || kingAttack > 0.2 || storm > 0.2;
++  const dev = development(move, before.moveNumber());
+   const forcing = check > 0 || move.isCapture() || move.isPromotion() || kingAttack > 0.2 || tension > 0.25 || storm > 0.2;
+ 
+   return {
+@@ -412,13 +675,15 @@
+       (CENTER[move.to] ?? 0) +
+       (move.piece === "p" && (CENTER[move.to] ?? 0) >= 1 ? 0.35 : 0) -
+       (CENTER[move.from] ?? 0) * 0.25,
+-    develop: development(move, before.moveNumber()),
++    develop: dev,
+     castle: move.isKingsideCastle() || move.isQueensideCastle() ? 1.4 : 0,
+     structure: clamp(structureDelta(beforeMap, afterMap, us), -2, 2),
+     capture: move.captured ? PIECE_VALUE[move.captured] / 3 : move.isPromotion() ? 0.8 : 0,
+     tension,
+     bind: clamp(pinScore(afterMap, us) - pinScore(beforeMap, us), -1.5, 2.4),
+     sacrifice: net <= -0.8 ? clamp(-net / 1.15, 0, 3) : 0,
++    attackSac: net <= -0.8 && attackish ? clamp(-net / 1.15, 0, 3) : 0,
++    gambit: net <= -0.8 && net >= -2.1 && !attackish && (dev > 0 || (CENTER[move.to] ?? 0) >= 0.6) ? clamp(-net / 1.15, 0, 3) : 0,
+     material: clamp(net / 1.1, -3, 3),
+     trade: tradeScore(ourDelta, theirDelta),
+     simplify: simplifyScore(beforeMap, afterMap, net),
+@@ -767,6 +1032,8 @@
+     safety: 0,
+     quiet: 0,
+     restraint: 0,
++    attackSac: 0,
++    gambit: 0,
+   };
+ }
+ 
