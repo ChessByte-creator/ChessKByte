@@ -1,6 +1,6 @@
 diff -ru orig/src/components/ChessApp.tsx ChessKByte-main/src/components/ChessApp.tsx
 --- orig/src/components/ChessApp.tsx	2026-11-20 20:58:35.900781666 +0000
-+++ ChessKByte-main/src/components/ChessApp.tsx	2026-11-20 20:59:00.125059566 +0000
++++ ChessKByte-main/src/components/ChessApp.tsx	2026-11-20 21:39:34.849120891 +0000
 @@ -44,6 +44,7 @@
  import { chooseWithRepetition, lineScore } from "@/lib/repetition";
  import { PERSONALITIES, personalityById, pickStyledMove, styleScore, type PersonalityId } from "@/lib/style";
@@ -9,6 +9,17 @@ diff -ru orig/src/components/ChessApp.tsx ChessKByte-main/src/components/ChessAp
  import { NewGameSheet, RatingPicker, ratingText, type SideChoice } from "@/components/chess/NewGameSheet";
  import { PuzzleScreen } from "@/components/chess/PuzzleScreen";
  import { OpeningsScreen } from "@/components/chess/OpeningsScreen";
+@@ -130,8 +131,8 @@
+   const [quip, setQuip] = useState(() => byteQuip(0));
+   const [view, setView] = useState<View>("match");
+   const [gameInfo, setGameInfo] = useState<GameInfo | null>(null);
+-  const [whiteBot, setWhiteBot] = useState<BotSeat>({ styleId: "aggressive", rating: 1600 });
+-  const [blackBot, setBlackBot] = useState<BotSeat>({ styleId: "positional", rating: 1600 });
++  const [whiteBot, setWhiteBot] = useState<BotSeat>({ styleId: "aggressive", rating: FULL_RATING });
++  const [blackBot, setBlackBot] = useState<BotSeat>({ styleId: "positional", rating: FULL_RATING });
+   const [duelRun, setDuelRun] = useState(false);
+   const [duelPace, setDuelPace] = useState<(typeof PACES)[number]["id"]>(800);
+   const [duelScore, setDuelScore] = useState<DuelScore>({ w: 0, d: 0, b: 0 });
 @@ -452,7 +453,7 @@
      // Abaixo da força plena o motor calcula raso e com várias linhas; a escolha entre elas é feita por rating (strength.ts).
      const rating = duelPlaying ? seat.rating : botRating;
@@ -73,8 +84,8 @@ diff -ru orig/src/components/chess/NewGameSheet.tsx ChessKByte-main/src/componen
 Only in ChessKByte-main/src/components/chess: StyleMixer.tsx
 diff -ru orig/src/lib/engine.ts ChessKByte-main/src/lib/engine.ts
 --- orig/src/lib/engine.ts	2026-11-20 20:58:35.904184184 +0000
-+++ ChessKByte-main/src/lib/engine.ts	2026-11-20 20:59:00.123866870 +0000
-@@ -40,7 +40,7 @@
++++ ChessKByte-main/src/lib/engine.ts	2026-11-20 21:41:46.969269935 +0000
+@@ -40,18 +40,22 @@
  };
  
  /** Time and depth for an honest search. Strength is applied later, on real scores. */
@@ -83,14 +94,20 @@ diff -ru orig/src/lib/engine.ts ChessKByte-main/src/lib/engine.ts
    const skill = Math.max(0, Math.min(20, level));
    const styled = opts?.styled ?? false;
    const pace = opts?.pace;
-@@ -49,9 +49,11 @@
+-  const base = 1000 + (skill / 20) * 3200;
++  // No duelo (pace informado) o bot pensa mais e não para na profundidade 18: sem isso as aberturas saíam em ~1 s, como blitz.
++  const duel = pace != null;
++  const base = duel ? 1800 + (skill / 20) * 4200 : 1000 + (skill / 20) * 3200;
+   let factor = 1;
    if (pace != null && pace <= 400) factor = 0.8;
    else if (pace != null && pace >= 1500) factor = 1.2;
    if (styled && skill < 18) factor *= 1.12;
-+  if (styled && opts?.wide) factor *= 1.15;
-   const movetime = Math.round(Math.max(900, Math.min(6000, base * factor)));
-   const depth = skill >= 18 ? 18 : skill >= 12 ? 15 : skill >= 6 ? 13 : 11;
+-  const movetime = Math.round(Math.max(900, Math.min(6000, base * factor)));
+-  const depth = skill >= 18 ? 18 : skill >= 12 ? 15 : skill >= 6 ? 13 : 11;
 -  const multipv = styled ? (skill >= 16 ? 3 : 4) : 1;
++  if (styled && opts?.wide) factor *= 1.15;
++  const movetime = Math.round(Math.max(900, Math.min(duel ? 8000 : 6000, base * factor)));
++  const depth = skill >= 18 ? (duel ? 40 : 18) : skill >= 12 ? 15 : skill >= 6 ? 13 : 11;
 +  // Mais linhas = mais lances de estilo para escolher; perfis de janela larga (sacrifício) precisam de mais.
 +  const multipv = styled ? (opts?.wide ? 7 : skill >= 16 ? 4 : 5) : 1;
    return { movetime, depth, multipv };
@@ -197,7 +214,7 @@ diff -ru orig/src/lib/style.test.ts ChessKByte-main/src/lib/style.test.ts
 +});
 diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
 --- orig/src/lib/style.ts	2026-11-20 20:58:35.906531435 +0000
-+++ ChessKByte-main/src/lib/style.ts	2026-11-20 21:30:35.077127891 +0000
++++ ChessKByte-main/src/lib/style.ts	2026-11-20 21:41:46.970033600 +0000
 @@ -15,7 +15,9 @@
    | "solid"
    | "materialist"
@@ -593,7 +610,7 @@ diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
  };
  
  const PIECE_VALUE: Record<PieceSymbol, number> = { p: 1, n: 3, b: 3.1, r: 5, q: 9, k: 0 };
-@@ -254,10 +449,32 @@
+@@ -254,6 +449,28 @@
    note: string;
  };
  
@@ -622,11 +639,6 @@ diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
  export function styleWindow(personality: Personality, skill: number): number {
    if (personality.windowCp <= 0) return 0;
    const clamped = Math.max(0, Math.min(20, skill));
--  const factor = 0.32 + ((20 - clamped) / 20) * 1.2;
-+  const factor = 0.55 + ((20 - clamped) / 20) * 0.9;
-   return Math.round(personality.windowCp * factor);
- }
- 
 @@ -285,6 +502,8 @@
    const deepest = pool.reduce((max, item) => Math.max(max, item.depth ?? 0), 0);
    const trusted = deepest > 0 ? pool.filter((item) => (item.depth ?? 0) >= deepest - 1) : pool;
@@ -636,7 +648,7 @@ diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
    if (personality.id === "balanced" || scoresAreNoise(args.depth, args.skill)) {
      return {
        uci: objective.uci,
-@@ -297,24 +516,52 @@
+@@ -297,24 +516,60 @@
    }
  
    const mates = trusted.filter((item) => item.mate != null && item.mate > 0);
@@ -653,9 +665,17 @@ diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
 +    const sacrificial = personality.weights.attackSac + personality.weights.sacrifice > 2.5;
 +    const stretch = sacrificial && objective.score < -80 ? 1.3 : 1;
 +    const openingScale = 1 - phase.opening * (1 - (personality.openingWindow ?? 0.5));
-+    const window = Math.round(styleWindow(personality, args.skill) * stretch * openingScale);
++    const strongCap = args.skill >= 18 ? 35 : Infinity; // no Máximo o estilo só desempata: sem lance impreciso
++    const window = Math.min(strongCap, Math.round(styleWindow(personality, args.skill) * stretch * openingScale));
 +    const floor = personality.floorCp != null ? Math.min(personality.floorCp, objective.score) : -Infinity;
-+    candidates = pool.filter((item) => objective.score - item.score <= window && item.score >= floor);
++    // Fora a "boa oportunidade" de sacrifício, o estilo escolhe só dentro da janela estreita: sem lances imprecisos.
++    const opp = personality.opportunityCp != null ? personality.opportunityCp * stretch : null;
++    const sacrifices = new Set(pool.filter((item) => (lineFeatures(args.fen, item.pv).sacrifice ?? 0) >= 0.9).map((item) => item.uci));
++    candidates = pool.filter((item) => {
++      if (item.score < floor) return false;
++      const gap = objective.score - item.score;
++      return gap <= window || (opp != null && sacrifices.has(item.uci) && gap <= opp);
++    });
    }
    if (candidates.length === 0) candidates = [objective];
  
@@ -695,7 +715,7 @@ diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
      const total = sumFeatures(weighted) + jitter + evalNudge;
      scored.set(item.uci, { total, weighted });
      if (total > bestTotal) {
-@@ -322,9 +569,10 @@
+@@ -322,9 +577,10 @@
        chosen = item;
      }
    }
@@ -707,7 +727,7 @@ diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
    const note = diverged ? `${personality.name} escolheu ${chosen.san} em vez de ${objective.san}: ${reason}.` : "";
    return {
      uci: chosen.uci,
-@@ -336,12 +584,13 @@
+@@ -336,12 +592,13 @@
    };
  }
  
@@ -724,7 +744,7 @@ diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
  }
  
  type Candidate = {
-@@ -382,11 +631,78 @@
+@@ -382,11 +639,78 @@
    return line.scoreCp ?? -30000;
  }
  
@@ -807,7 +827,7 @@ diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
  }
  
  function featuresOf(fen: string, move: Move, after: Chess): Features {
-@@ -402,6 +718,8 @@
+@@ -402,6 +726,8 @@
    const kingAttack = clamp((kingPressure(afterMap, us) - kingPressure(beforeMap, us)) / 1.15, -1.5, 3);
    const storm = pawnStorm(move, them, beforeMap);
    const tension = clamp(attackTension(beforeMap, afterMap, us) / 2.2, -1.5, 2.6);
@@ -816,7 +836,7 @@ diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
    const forcing = check > 0 || move.isCapture() || move.isPromotion() || kingAttack > 0.2 || tension > 0.25 || storm > 0.2;
  
    return {
-@@ -412,13 +730,15 @@
+@@ -412,13 +738,15 @@
        (CENTER[move.to] ?? 0) +
        (move.piece === "p" && (CENTER[move.to] ?? 0) >= 1 ? 0.35 : 0) -
        (CENTER[move.from] ?? 0) * 0.25,
@@ -833,7 +853,7 @@ diff -ru orig/src/lib/style.ts ChessKByte-main/src/lib/style.ts
      material: clamp(net / 1.1, -3, 3),
      trade: tradeScore(ourDelta, theirDelta),
      simplify: simplifyScore(beforeMap, afterMap, net),
-@@ -767,6 +1087,8 @@
+@@ -767,6 +1095,8 @@
      safety: 0,
      quiet: 0,
      restraint: 0,

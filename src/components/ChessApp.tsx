@@ -131,8 +131,8 @@ export function ChessApp() {
   const [quip, setQuip] = useState(() => byteQuip(0));
   const [view, setView] = useState<View>("match");
   const [gameInfo, setGameInfo] = useState<GameInfo | null>(null);
-  const [whiteBot, setWhiteBot] = useState<BotSeat>({ styleId: "aggressive", rating: 1600 });
-  const [blackBot, setBlackBot] = useState<BotSeat>({ styleId: "positional", rating: 1600 });
+  const [whiteBot, setWhiteBot] = useState<BotSeat>({ styleId: "aggressive", rating: FULL_RATING });
+  const [blackBot, setBlackBot] = useState<BotSeat>({ styleId: "positional", rating: FULL_RATING });
   const [duelRun, setDuelRun] = useState(false);
   const [duelPace, setDuelPace] = useState<(typeof PACES)[number]["id"]>(800);
   const [duelScore, setDuelScore] = useState<DuelScore>({ w: 0, d: 0, b: 0 });

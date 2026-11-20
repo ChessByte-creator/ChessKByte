@@ -474,7 +474,7 @@ function phaseWeights(personality: Personality, phase: Phase): Weights {
 export function styleWindow(personality: Personality, skill: number): number {
   if (personality.windowCp <= 0) return 0;
   const clamped = Math.max(0, Math.min(20, skill));
-  const factor = 0.55 + ((20 - clamped) / 20) * 0.9;
+  const factor = 0.32 + ((20 - clamped) / 20) * 1.2;
   return Math.round(personality.windowCp * factor);
 }
 
@@ -526,9 +526,17 @@ export function pickStyledMove(args: {
     const sacrificial = personality.weights.attackSac + personality.weights.sacrifice > 2.5;
     const stretch = sacrificial && objective.score < -80 ? 1.3 : 1;
     const openingScale = 1 - phase.opening * (1 - (personality.openingWindow ?? 0.5));
-    const window = Math.round(styleWindow(personality, args.skill) * stretch * openingScale);
+    const strongCap = args.skill >= 18 ? 35 : Infinity; // no Máximo o estilo só desempata: sem lance impreciso
+    const window = Math.min(strongCap, Math.round(styleWindow(personality, args.skill) * stretch * openingScale));
     const floor = personality.floorCp != null ? Math.min(personality.floorCp, objective.score) : -Infinity;
-    candidates = pool.filter((item) => objective.score - item.score <= window && item.score >= floor);
+    // Fora a "boa oportunidade" de sacrifício, o estilo escolhe só dentro da janela estreita: sem lances imprecisos.
+    const opp = personality.opportunityCp != null ? personality.opportunityCp * stretch : null;
+    const sacrifices = new Set(pool.filter((item) => (lineFeatures(args.fen, item.pv).sacrifice ?? 0) >= 0.9).map((item) => item.uci));
+    candidates = pool.filter((item) => {
+      if (item.score < floor) return false;
+      const gap = objective.score - item.score;
+      return gap <= window || (opp != null && sacrifices.has(item.uci) && gap <= opp);
+    });
   }
   if (candidates.length === 0) candidates = [objective];
 
