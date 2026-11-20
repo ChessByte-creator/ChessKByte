@@ -1,0 +1,18 @@
+import { gameMatcher, ecoRange, tokensToFilters, norm } from "./tok-bundle.mjs";
+const g = (w, b, r, eco = "B90") => ({ white: w, black: b, result: r, players: [norm(w), norm(b)], eco, cat: [], plies: 40, year: 2020, maxElo: 2500, opening: "", event: "", family: "", source: "" });
+const games = [g("Magnus Carlsen", "Hikaru Nakamura", "1-0"), g("Hikaru Nakamura", "Magnus Carlsen", "1-0"), g("Magnus Carlsen", "Ian Nepomniachtchi", "1/2-1/2", "C42"), g("Ian Nepomniachtchi", "Magnus Carlsen", "0-1")];
+const run = (f) => games.map((x, i) => (gameMatcher(f)(x) ? i : null)).filter((x) => x !== null).join(",");
+const eq = (label, got, want) => console.log(got === want ? "ok  " : "ERRO", label, got, "(esperado", want + ")");
+eq("jogador", run({ player: "magnus" }), "0,1,2,3");
+eq("de brancas", run({ player: "magnus", playerSide: "white" }), "0,2");
+eq("vitórias dele", run({ player: "magnus", outcome: "win" }), "0,3");
+eq("derrotas dele", run({ player: "magnus", outcome: "loss" }), "1");
+eq("empates", run({ player: "magnus", outcome: "draw" }), "2");
+eq("contra Hikaru", run({ player: "magnus", opponent: "hikaru" }), "0,1");
+eq("contra Hikaru, de pretas, vitórias dele", run({ player: "magnus", opponent: "hikaru", playerSide: "black", outcome: "win" }), "1" === "" ? "" : "");
+eq("ECO C42", run({ player: "magnus", ecoIn: ["C42"] }), "2");
+eq("ecoRange B9", ecoRange("B9").length + ecoRange("B9")[0], "10B90");
+eq("ecoRange B", String(ecoRange("B").length), "100");
+eq("ecoRange C42", ecoRange("c42").join(), "C42");
+const f = tokensToFilters([{ kind: "player", name: "Magnus", id: 5 }, { kind: "player", name: "Hikaru", id: 9 }, { kind: "opening", label: "x", ecos: ["B90"] }, { kind: "eco", label: "y", ecos: ["B91", "B90"] }]);
+eq("tokens→filtros", JSON.stringify([f.player, f.playerId, f.opponent, f.opponentId, f.ecoIn]), JSON.stringify(["Magnus", 5, "Hikaru", 9, ["B90", "B91"]]));

@@ -1,0 +1,260 @@
+import { Chess, type Move, type Square } from "chess.js";
+import { type WhiteEval } from "@/lib/eval";
+import { isThreefold } from "@/lib/repetition";
+
+export type Ply = {
+  fen: string;
+  san?: string;
+  uci?: string;
+  color?: "w" | "b";
+  from?: Square;
+  to?: Square;
+};
+
+export function startPlies(): Ply[] {
+  return [{ fen: new Chess().fen() }];
+}
+
+/** Identifica a partida: posição inicial + lances. Mudou o FEN ou o PGN, mudou a chave. */
+export function pliesKey(plies: Ply[]) {
+  return `${plies[0]?.fen ?? ""}|${plies
+    .slice(1)
+    .map((ply) => ply.uci ?? "")
+    .join(" ")}`;
+}
+
+export const START_FEN = new Chess().fen();
+
+export function isStandardStart(plies: Ply[]) {
+  return plies[0]?.fen === START_FEN;
+}
+
+export function playUci(fen: string, uci: string): Move | null {
+  if (!uci || uci === "(none)" || uci.length < 4) return null;
+  const chess = new Chess(fen);
+  const moved = chess.move({
+    from: uci.slice(0, 2) as Square,
+    to: uci.slice(2, 4) as Square,
+    promotion: uci.length > 4 ? (uci[4] as "q" | "r" | "b" | "n") : undefined,
+  });
+  return moved ?? null;
+}
+
+export function appendMove(plies: Ply[], fen: string, from: Square, to: Square, promotion?: "q" | "r" | "b" | "n") {
+  const chess = new Chess(fen);
+  const moved = chess.move({ from, to, promotion });
+  if (!moved) return null;
+  const ply: Ply = {
+    fen: chess.fen(),
+    san: moved.san,
+    uci: `${moved.from}${moved.to}${moved.promotion ?? ""}`,
+    color: moved.color,
+    from: moved.from,
+    to: moved.to,
+  };
+  return { plies: [...plies, ply], move: moved };
+}
+
+export function sanOfUci(fen: string, uci: string) {
+  const moved = playUci(fen, uci);
+  return moved?.san ?? uci;
+}
+
+export function formatPv(fen: string, pv: string, max = 8) {
+  const chess = new Chess(fen);
+  const parts: string[] = [];
+  let turn = chess.turn();
+  let moveNo = chess.moveNumber();
+  let started = false;
+  for (const token of pv.split(/\s+/)) {
+    if (!/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(token)) break;
+    if (parts.length >= max) break;
+    let moved: Move | null = null;
+    try {
+      moved = chess.move({
+        from: token.slice(0, 2) as Square,
+        to: token.slice(2, 4) as Square,
+        promotion: token.length > 4 ? (token[4] as "q" | "r" | "b" | "n") : undefined,
+      });
+    } catch {
+      moved = null;
+    }
+    if (!moved) break;
+    if (!started && turn === "b") parts.push(`${moveNo}...`);
+    else if (turn === "w") parts.push(`${moveNo}.`);
+    parts.push(moved.san);
+    if (turn === "b") moveNo += 1;
+    turn = turn === "w" ? "b" : "w";
+    started = true;
+  }
+  return parts.join(" ");
+}
+
+export function kingInCheck(fen: string): Square | null {
+  const chess = new Chess(fen);
+  if (!chess.isCheck()) return null;
+  const turn = chess.turn();
+  const board = chess.board();
+  for (let rank = 0; rank < 8; rank += 1) {
+    for (let file = 0; file < 8; file += 1) {
+      const piece = board[rank]?.[file];
+      if (piece?.type === "k" && piece.color === turn) {
+        return `${"abcdefgh"[file]}${8 - rank}` as Square;
+      }
+    }
+  }
+  return null;
+}
+
+export function resultText(fen: string): string | null {
+  const chess = new Chess(fen);
+  if (chess.isCheckmate()) {
+    return chess.turn() === "w" ? "Xeque-mate. Vitória das pretas." : "Xeque-mate. Vitória das brancas.";
+  }
+  if (chess.isStalemate()) return "Empate por afogamento.";
+  if (chess.isDrawByFiftyMoves()) return "Empate pela regra dos 50 lances.";
+  if (chess.isInsufficientMaterial()) return "Empate por material insuficiente.";
+  if (chess.isDraw()) return "Empate.";
+  return null;
+}
+
+/** Resultado da partida, incluindo a repetição tripla (que só se enxerga olhando os lances, não um FEN solto). */
+export function outcomeOf(plies: Ply[]): string | null {
+  const last = plies[plies.length - 1];
+  if (!last) return null;
+  return resultText(last.fen) ?? (isThreefold(plies) ? "Empate por repetição." : null);
+}
+
+/** Posição inicial + lances até o índice `k`, no formato que o motor entende (`position fen ... moves ...`). */
+export function historyAt(plies: Ply[], k: number) {
+  const moves: string[] = [];
+  for (const ply of plies.slice(1, k + 1)) {
+    if (!ply.uci) return undefined;
+    moves.push(ply.uci);
+  }
+  return { startFen: plies[0].fen, moves };
+}
+
+/** Avaliação terminal na posição `k`: xeque-mate, afogamento, material, 50 lances ou repetição tripla. */
+export function terminalEvalAt(plies: Ply[], k: number): WhiteEval | null {
+  const fen = plies[k]?.fen;
+  if (!fen) return null;
+  return terminalEval(fen) ?? (isThreefold(plies.slice(0, k + 1)) ? { cp: 0, mate: null } : null);
+}
+
+export function pgnOf(plies: Ply[]) {
+  const chess = new Chess(plies[0]?.fen ?? START_FEN);
+  for (const ply of plies.slice(1)) {
+    if (!ply.from || !ply.to) break;
+    try {
+      const moved = chess.move({
+        from: ply.from,
+        to: ply.to,
+        promotion: ply.uci && ply.uci.length > 4 ? (ply.uci[4] as "q" | "r" | "b" | "n") : undefined,
+      });
+      if (!moved) break;
+    } catch {
+      break;
+    }
+  }
+  return chess.pgn();
+}
+
+export function pliesFromText(text: string): Ply[] | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const asFen = new Chess();
+  if (!trimmed.includes("[") && trimmed.split(/\s+/).length >= 4) {
+    try {
+      asFen.load(trimmed);
+      return [{ fen: asFen.fen() }];
+    } catch {
+      /* try pgn */
+    }
+  }
+  // PGN colado de sites e livros costuma vir "sujo": ponto depois do resultado ("1-0."), comentários, variantes,
+  // símbolos $n, roque com zero (0-0). Tenta o texto como veio e depois versões cada vez mais limpas.
+  for (const candidate of pgnCandidates(trimmed)) {
+    const asPgn = new Chess();
+    try {
+      asPgn.loadPgn(candidate);
+      return replay(asPgn, asPgn.getHeaders().FEN);
+    } catch {
+      /* tenta a próxima versão */
+    }
+  }
+  return null;
+}
+
+function pgnCandidates(text: string): string[] {
+  const out = [text];
+  // Só o ponto solto depois do resultado.
+  const noDot = text.replace(/(1-0|0-1|1\/2-1\/2|½-½|\*)\s*\.+\s*$/, "$1");
+  if (noDot !== text) out.push(noDot);
+  // Limpeza geral: comentários, variantes, NAGs, roque com zero, resultado com ½.
+  let clean = noDot.replace(/\{[^}]*\}/g, " ").replace(/;[^\n]*/g, " ");
+  for (let depth = 0; depth < 4; depth += 1) clean = clean.replace(/\([^()]*\)/g, " ");
+  clean = clean
+    .replace(/\$\d+/g, " ")
+    .replace(/(^|\s)0-0-0/g, "$1O-O-O")
+    .replace(/(^|\s)0-0(?![-\d])/g, "$1O-O")
+    .replace(/½-½/g, "1/2-1/2");
+  if (clean !== noDot) out.push(clean);
+  return out;
+}
+
+function replay(finalGame: Chess, startFen?: string): Ply[] {
+  const verbose = finalGame.history({ verbose: true });
+  const chess = new Chess(startFen ?? START_FEN);
+  const plies: Ply[] = [{ fen: chess.fen() }];
+  for (const move of verbose) {
+    chess.move({ from: move.from, to: move.to, promotion: move.promotion });
+    plies.push({
+      fen: chess.fen(),
+      san: move.san,
+      uci: `${move.from}${move.to}${move.promotion ?? ""}`,
+      color: move.color,
+      from: move.from,
+      to: move.to,
+    });
+  }
+  return plies;
+}
+
+export function terminalEval(fen: string): WhiteEval | null {
+  const chess = new Chess(fen);
+  if (chess.isCheckmate()) {
+    const whiteMated = chess.turn() === "w";
+    return { cp: whiteMated ? -10000 : 10000, mate: whiteMated ? -1 : 1 };
+  }
+  if (chess.isDraw()) return { cp: 0, mate: null };
+  return null;
+}
+
+export function positionEvalOr(fen: string, fallback: WhiteEval): WhiteEval {
+  return terminalEval(fen) ?? fallback;
+}
+
+/** Reconstrói a partida a partir de lances em SAN separados por espaço (sem números). */
+export function pliesFromSan(moves: string): Ply[] {
+  const chess = new Chess();
+  const plies: Ply[] = [{ fen: chess.fen() }];
+  for (const san of moves.split(/\s+/).filter(Boolean)) {
+    let moved: Move | null = null;
+    try {
+      moved = chess.move(san);
+    } catch {
+      moved = null;
+    }
+    if (!moved) break;
+    plies.push({
+      fen: chess.fen(),
+      san: moved.san,
+      uci: `${moved.from}${moved.to}${moved.promotion ?? ""}`,
+      color: moved.color,
+      from: moved.from,
+      to: moved.to,
+    });
+  }
+  return plies;
+}
