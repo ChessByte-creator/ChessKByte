@@ -60,6 +60,12 @@ export type Personality = {
   forceAttackSac?: boolean;
   /** Avaliação absoluta mínima (cp) que o perfil aceita criar por estilo. */
   floorCp?: number;
+  /** Quanto do gosto por sacrifício sobra na abertura (0 = nenhum, 1 = tudo). Padrão 0,3. */
+  openingSac?: number;
+  /** Fração da janela de estilo que vale na abertura. Padrão 0,5. */
+  openingWindow?: number;
+  /** Sacrifício só é jogado se o motor ainda o avalia a até X cp do melhor lance: "boa oportunidade". */
+  opportunityCp?: number;
 };
 
 const ZERO_W: Weights = {
@@ -124,15 +130,22 @@ export const PERSONALITIES: Personality[] = [
   {
     id: "kamikaze",
     name: "Kamikaze",
-    blurb: "Sacrifica material em quase todo ataque. Quer o rei do adversário, não a vantagem.",
-    windowCp: 260,
-    care: 0.35,
+    blurb: "Abre normal (às vezes com gambito). No meio-jogo, ao ver a chance, sacrifica material para atacar o rei.",
+    windowCp: 180,
+    care: 0.45,
     gain: 1.6,
-    floorCp: -260,
+    floorCp: -250,
     forceAttackSac: true,
+    opportunityCp: 130,
+    openingSac: 0,
+    openingWindow: 0.3,
     weights: w({
       attackSac: 5,
       sacrifice: 2.2,
+      gambit: 2,
+      develop: 1.2,
+      castle: 0.8,
+      center: 0.6,
       check: 3.4,
       kingAttack: 3.8,
       storm: 2.6,
@@ -303,6 +316,9 @@ function blend(mix: StyleMix): Omit<Personality, "id" | "name"> {
   let cap = 0;
   let floor = 0;
   let force = 0;
+  let openSac = 0;
+  let openWin = 0;
+  let opp = 0;
   for (const { item, share } of parts) {
     const f = share / total;
     for (const axis of AXES) weights[axis] += item.weights[axis] * f * k;
@@ -312,6 +328,9 @@ function blend(mix: StyleMix): Omit<Personality, "id" | "name"> {
     cap += (item.sacCap ?? 3.5) * f;
     floor += (item.floorCp ?? -600) * f;
     if (item.forceAttackSac) force += f;
+    openSac += (item.openingSac ?? 0.3) * f;
+    openWin += (item.openingWindow ?? 0.5) * f;
+    opp += (item.opportunityCp ?? 250) * f;
   }
   const top = parts
     .slice()
@@ -327,6 +346,9 @@ function blend(mix: StyleMix): Omit<Personality, "id" | "name"> {
     sacCap: cap >= 3 ? undefined : cap,
     floorCp: floor <= -550 ? undefined : Math.round(floor),
     forceAttackSac: force >= 0.5,
+    openingSac: openSac,
+    openingWindow: openWin,
+    opportunityCp: opp >= 240 ? undefined : Math.round(opp),
   };
 }
 
@@ -427,6 +449,28 @@ export type StyleChoice = {
   note: string;
 };
 
+type Phase = { opening: number; endgame: number };
+
+/** Fase da partida lida do FEN: abertura (1 até o lance 6, some até o 12) e final (poucas peças maiores). */
+function phaseOf(fen: string): Phase {
+  const parts = fen.split(" ");
+  const fullmove = Number(parts[5]) || 1;
+  let officers = 0;
+  for (const ch of (parts[0] ?? "").toLowerCase()) if ("nbrq".includes(ch)) officers += 1;
+  return { opening: clamp((12 - fullmove) / 6, 0, 1), endgame: clamp((8 - officers) / 4, 0, 1) };
+}
+
+/** Os pesos do perfil nesta fase: na abertura o gosto por sacrifício, tempestade e "não ser quieto" murcha. */
+function phaseWeights(personality: Personality, phase: Phase): Weights {
+  const keep = personality.openingSac ?? 0.3;
+  const sac = (1 - phase.opening * (1 - keep)) * (1 - phase.endgame * 0.5);
+  const out = { ...personality.weights };
+  for (const axis of ["sacrifice", "attackSac", "storm"] as const) if (out[axis] > 0) out[axis] *= sac;
+  if (out.material < 0) out.material *= sac;
+  if (out.quiet < 0) out.quiet *= 1 - phase.opening * 0.8;
+  return out;
+}
+
 export function styleWindow(personality: Personality, skill: number): number {
   if (personality.windowCp <= 0) return 0;
   const clamped = Math.max(0, Math.min(20, skill));
@@ -458,6 +502,8 @@ export function pickStyledMove(args: {
   const deepest = pool.reduce((max, item) => Math.max(max, item.depth ?? 0), 0);
   const trusted = deepest > 0 ? pool.filter((item) => (item.depth ?? 0) >= deepest - 1) : pool;
   const objective = trusted.reduce((best, item) => (item.score > best.score ? item : best));
+  const phase = phaseOf(args.fen);
+  const phased = phaseWeights(personality, phase);
   if (personality.id === "balanced" || scoresAreNoise(args.depth, args.skill)) {
     return {
       uci: objective.uci,
@@ -479,7 +525,8 @@ export function pickStyledMove(args: {
     // Perfis de sacrifício ganham folga extra quando já estão pior: nada a perder.
     const sacrificial = personality.weights.attackSac + personality.weights.sacrifice > 2.5;
     const stretch = sacrificial && objective.score < -80 ? 1.3 : 1;
-    const window = Math.round(styleWindow(personality, args.skill) * stretch);
+    const openingScale = 1 - phase.opening * (1 - (personality.openingWindow ?? 0.5));
+    const window = Math.round(styleWindow(personality, args.skill) * stretch * openingScale);
     const floor = personality.floorCp != null ? Math.min(personality.floorCp, objective.score) : -Infinity;
     candidates = pool.filter((item) => objective.score - item.score <= window && item.score >= floor);
   }
@@ -489,12 +536,20 @@ export function pickStyledMove(args: {
   for (const item of candidates) raws.set(item.uci, lineFeatures(args.fen, item.pv));
   if (!takingMate) {
     // Fidelidade: o que o perfil recusa nunca entra; o que ele ama tem prioridade.
-    if (personality.sacCap != null) {
-      const cap = personality.sacCap;
+    // Abertura normal: nada de sacrificar nos primeiros lances (só um gambito de peão, para quem gosta).
+    const openCap = phase.opening >= 0.5 ? (personality.weights.gambit > 1.5 ? 1.8 : 0.9) : Infinity;
+    const cap = Math.min(personality.sacCap ?? Infinity, openCap);
+    if (cap !== Infinity) {
       const kept = candidates.filter((item) => (raws.get(item.uci)?.sacrifice ?? 0) <= cap);
       if (kept.length > 0) candidates = kept;
     }
-    if (personality.forceAttackSac) {
+    // Boa oportunidade: só sacrifica se o motor ainda gosta da linha.
+    if (personality.opportunityCp != null) {
+      const limit = objective.score - personality.opportunityCp * (objective.score < -80 ? 1.3 : 1);
+      const sound = candidates.filter((item) => (raws.get(item.uci)?.sacrifice ?? 0) < 0.9 || item.score >= limit);
+      if (sound.length > 0) candidates = sound;
+    }
+    if (personality.forceAttackSac && phase.opening < 0.5) {
       const attacking = candidates.filter((item) => (raws.get(item.uci)?.attackSac ?? 0) >= 1.2);
       if (attacking.length > 0) candidates = attacking;
     }
@@ -504,7 +559,7 @@ export function pickStyledMove(args: {
   let bestTotal = -Infinity;
   const scored = new Map<string, { total: number; weighted: Features }>();
   for (const item of candidates) {
-    const weighted = applyWeights(raws.get(item.uci) ?? zeroFeatures(), personality.weights);
+    const weighted = applyWeights(raws.get(item.uci) ?? zeroFeatures(), phased);
     const jitter = (hashText(`${args.fen}|${item.uci}`) - 0.5) * 0.18;
     const evalNudge = ((item.score - objective.score) / 32) * (personality.care ?? 1);
     const total = sumFeatures(weighted) + jitter + evalNudge;
@@ -514,7 +569,7 @@ export function pickStyledMove(args: {
       chosen = item;
     }
   }
-  const objectiveWeighted = applyWeights(raws.get(objective.uci) ?? lineFeatures(args.fen, objective.pv), personality.weights);
+  const objectiveWeighted = applyWeights(raws.get(objective.uci) ?? lineFeatures(args.fen, objective.pv), phased);
 
   const diverged = chosen.uci !== objective.uci;
   const reason = diverged ? reasonFor(scored.get(chosen.uci)?.weighted, objectiveWeighted) : "";
@@ -535,7 +590,7 @@ export function styleScore(fen: string, uci: string, personalityId: PersonalityI
   if (!played) return null;
   const personality = personalityById(personalityId);
   const features = pv && pv.trim().split(/\s+/)[0] === uci ? lineFeatures(fen, pv) : featuresOf(fen, played.move, played.chess);
-  return sumFeatures(applyWeights(features, personality.weights));
+  return sumFeatures(applyWeights(features, phaseWeights(personality, phaseOf(fen))));
 }
 
 type Candidate = {

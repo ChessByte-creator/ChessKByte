@@ -88,12 +88,24 @@ describe("pickStyledMove", () => {
 
 describe("personalidades de sacrifício", () => {
   // Brancas podem jogar Bxh7+ (sacrifício de ataque) ou o lance quieto Bd2.
-  const GREEK = "r1bq1rk1/ppp2ppp/2n1pn2/3p4/3P4/2NBPN2/PPP2PPP/R1BQ1RK1 w - - 0 9";
+  const GREEK = "r1bq1rk1/ppp2ppp/2n1pn2/3p4/3P4/2NBPN2/PPP2PPP/R1BQ1RK1 w - - 0 14";
   const lines = [line("c1d2", 30), line("d3h7 f6h7 f3g5 h7g5", -20)];
 
   it("o Kamikaze joga o sacrifício de ataque dentro da janela", () => {
     const choice = pickStyledMove({ fen: GREEK, bestmove: "c1d2", personalityId: "kamikaze", skill: 8, lines });
     assert.equal(choice.uci, "d3h7");
+  });
+
+  it("na abertura o Kamikaze joga normal, sem sacrificar", () => {
+    const early = GREEK.replace(" 0 14", " 0 3");
+    const choice = pickStyledMove({ fen: early, bestmove: "c1d2", personalityId: "kamikaze", skill: 8, lines });
+    assert.equal(choice.uci, "c1d2");
+  });
+
+  it("sem boa oportunidade (motor não gosta da linha) o Kamikaze não sacrifica", () => {
+    const bad = [line("c1d2", 30), line("d3h7 f6h7 f3g5 h7g5", -150)];
+    const choice = pickStyledMove({ fen: GREEK, bestmove: "c1d2", personalityId: "kamikaze", skill: 8, lines: bad });
+    assert.equal(choice.uci, "c1d2");
   });
 
   it("o Sólido e o Materialista recusam o mesmo sacrifício", () => {

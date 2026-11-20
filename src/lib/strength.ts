@@ -163,20 +163,22 @@ export function pickByRating(args: {
     const values = raw.map((item) => ({ uci: item.uci, v: args.styleOf?.(item.uci) ?? 0 }));
     const mean = values.reduce((s, x) => s + x.v, 0) / values.length;
     const sd = Math.sqrt(values.reduce((s, x) => s + (x.v - mean) ** 2, 0) / values.length) || 1;
-    biases = new Map(values.map((x) => [x.uci, Math.max(-1.5, Math.min(1.5, (x.v - mean) / sd)) * (args.styleGain ?? 0.5)]));
+    biases = new Map(values.map((x) => [x.uci, Math.max(-1.5, Math.min(1.5, (x.v - mean) / sd)) * Math.min(0.8, args.styleGain ?? 0.5)]));
   }
+  // O estilo só desempata entre lances de qualidade parecida: nunca promove um lance muito pior que o melhor.
+  const slack = p.temperature + 2;
   let cands: Cand[] = raw.map((item) => ({
     uci: item.uci,
     win: item.win,
     loss: topWin - item.win,
-    bias: biases.get(item.uci) ?? 0,
+    bias: topWin - item.win <= slack ? (biases.get(item.uci) ?? 0) : Math.min(0, biases.get(item.uci) ?? 0),
     hangs: args.fen && item.win < topWin - 0.5 ? newSacrifice(args.fen, item.uci) !== null : false,
   }));
 
   // Distração: só com probabilidade `blind` o bot "não vê" que o lance entrega uma peça. No resto das vezes ele
   // descarta esses lances (se sobrar algum outro), como um jogador do rating faria.
   if (args.fen && rng() >= p.blind) {
-    const safe = cands.filter((item) => !item.hangs || (args.keepSacrifices === true && item.bias >= 0.5));
+    const safe = cands.filter((item) => !item.hangs || (args.keepSacrifices === true && item.bias >= 0.5 && item.loss <= 3));
     if (safe.length > 0) cands = safe;
   }
 
