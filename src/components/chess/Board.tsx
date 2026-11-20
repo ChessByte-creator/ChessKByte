@@ -41,6 +41,8 @@ type Props = {
   premoveSquares?: Square[];
   /** Peças dessa cor podem ser pegas mesmo fora da vez, para agendar um premove. */
   premoveColor?: "w" | "b" | null;
+  /** No celular o tabuleiro vai de ponta a ponta, sem cantos arredondados nem borda lateral. */
+  flush?: boolean;
   interactive: boolean;
   player: "w" | "b" | "both";
   onSquare: (square: Square) => void;
@@ -71,6 +73,7 @@ export function Board({
   drawColor = "green",
   premoveSquares = [],
   premoveColor = null,
+  flush = false,
   interactive,
   player,
   onSquare,
@@ -174,7 +177,7 @@ export function Board({
   return (
     <div className="relative w-full">
       <div
-        className="grid aspect-square w-full touch-none grid-cols-8 grid-rows-8 overflow-hidden rounded-lg border-4 border-walnut shadow-sm"
+        className={`grid aspect-square w-full touch-none grid-cols-8 grid-rows-8 overflow-hidden rounded-lg border-4 border-walnut shadow-sm ${flush ? "max-lg:rounded-none max-lg:border-x-0 max-lg:border-y-2" : ""}`}
         role="grid"
         aria-label="Tabuleiro de xadrez"
         onContextMenu={(event) => event.preventDefault()}
