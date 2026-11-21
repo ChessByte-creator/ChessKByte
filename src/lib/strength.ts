@@ -75,15 +75,17 @@ type Anchor = {
   multipv: number;
 };
 
+// Do 1600 para cima a busca é mais funda (menos erro tático de "blitz"); a graça humana fica na temperatura.
+// ATENÇÃO: essa profundidade NÃO foi recalibrada por partidas: o bot tende a ficar mais forte que o rating do nome.
 export const ANCHORS: Anchor[] = [
   // 400 e 800 ainda são estimativas (não medidas por partidas). Os demais foram calibrados contra o Stockfish com UCI_Elo.
   { rating: 400, temperature: 40, blind: 0.6, lapse: 0, lapseMin: 12, lapseMax: 55, depth: 1, movetime: 300, multipv: 12 },
   { rating: 800, temperature: 24, blind: 0.35, lapse: 0, lapseMin: 12, lapseMax: 55, depth: 2, movetime: 300, multipv: 10 },
   { rating: 1200, temperature: 8.5, blind: 0.12, lapse: 0, lapseMin: 10, lapseMax: 50, depth: 4, movetime: 400, multipv: 8 },
-  { rating: 1600, temperature: 5, blind: 0.04, lapse: 0, lapseMin: 10, lapseMax: 45, depth: 4, movetime: 600, multipv: 6 },
-  { rating: 2000, temperature: 3.5, blind: 0, lapse: 0, lapseMin: 8, lapseMax: 30, depth: 5, movetime: 900, multipv: 5 },
-  { rating: 2400, temperature: 2.1, blind: 0, lapse: 0, lapseMin: 8, lapseMax: 25, depth: 6, movetime: 1500, multipv: 4 },
-  { rating: 2600, temperature: 4.2, blind: 0, lapse: 0, lapseMin: 8, lapseMax: 25, depth: 8, movetime: 2200, multipv: 3 },
+  { rating: 1600, temperature: 5, blind: 0.04, lapse: 0, lapseMin: 10, lapseMax: 45, depth: 6, movetime: 1000, multipv: 6 },
+  { rating: 2000, temperature: 3.5, blind: 0, lapse: 0, lapseMin: 8, lapseMax: 30, depth: 8, movetime: 1600, multipv: 5 },
+  { rating: 2400, temperature: 2.1, blind: 0, lapse: 0, lapseMin: 8, lapseMax: 25, depth: 11, movetime: 2600, multipv: 4 },
+  { rating: 2600, temperature: 4.2, blind: 0, lapse: 0, lapseMin: 8, lapseMax: 25, depth: 14, movetime: 3600, multipv: 3 },
 ];
 
 export function paramsFor(rating: number): Anchor {
